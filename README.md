@@ -17,6 +17,8 @@ Configuration:
   - Update SETUP_COMMANDS with the shell commands to run post-pull
 
 Usage:
-  $ git checkout https://github.com/companionintelligence/CI-Server
-  $ chmod +x git_update_daemon.py
-  $ ./ci-server_local_cicd.py &
+```
+git checkout https://github.com/companionintelligence/CI-Server
+chmod +x git_update_daemon.py
+./ci-server_local_cicd.py &
+```
