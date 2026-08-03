@@ -1,0 +1,57 @@
+# ci-local policy
+#
+# Default stance: every workflow with an automatic trigger gets gated down to
+# `workflow_dispatch`, and its checks move to local hardware. The lists below
+# are the exceptions.
+#
+# Patterns are `repo/workflow.yml` globs (fnmatch). Run `ci-local audit` after
+# editing to see the effect before applying anything.
+
+[workflows]
+
+# Left on their automatic triggers. These are ship paths - merging or tagging
+# is supposed to make something happen in the world - and together they are a
+# small fraction of the bill. Reusable workflows (`workflow_call`) are kept
+# automatically and do not need listing here.
+keep = [
+  # Deploy on merge. Breaking these means merged code silently never ships.
+  "CI-Portal/deploy.yml",
+  "CI-Marketplace/deploy.yml",
+  "CI-Docs/deploy-cloudflare.yml",
+  "CI-Spatial-Companion-WebXR/pages-deploy.yml",
+  "CI-WebXR-Time-Machine/deploy-cloudflare-pages.yml",
+
+  # Tag-triggered releases and package publishing.
+  "CI-Hub/publish-package-managers.yml",
+  "Companion-Pipe/release-*.yml",
+  "Companion-Pipe/sdk-release.yml",
+  "CI-Applet/release.yml",
+  "CI-Browser-Extension/release.yml",
+]
+
+# Gated even if a `keep` pattern would otherwise match. Use this for the
+# expensive outliers: scheduled builds nobody reads, and publish workflows that
+# also fire on every pull request.
+force_gate = [
+  "CI-Hub/nightly-release.yml",
+]
+
+[repos]
+# Local clone directory -> GitHub repository name. A rename on GitHub does not
+# rename the clone, and the usage report only knows the GitHub name, so without
+# these the audit reports $0 for a repo that is in fact costing money.
+aliases = { CI-Applet = "CI-Capture" }
+
+# Clone directories ignored entirely. CI-Gateway was deleted from the org; the
+# local clone's origin still points at the dead URL, so every fetch fails.
+exclude = ["CI-Gateway"]
+
+# Per-repo corrections for layouts the detector cannot read off disk.
+#
+#   workdir  = subdirectory the real project lives in
+#   commands = replace the detected checks entirely
+#   skip     = exclude from `run` and `hooks install`
+[checks.CI-Import-Tools]
+# The root manifest is a decoy: vitest must run from backend/, and a root-level
+# run resolves the wrong workspace.
+workdir = "backend"
