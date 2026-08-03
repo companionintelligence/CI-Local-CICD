@@ -10,9 +10,150 @@
 
 ---
 
+## `ci-local` — move CI off billed runners
+
+`ci-local` does two things: it gates GitHub Actions workflows down to manual
+(`workflow_dispatch`) so they stop consuming billed minutes, and it runs the
+equivalent lint/test/build steps on local hardware instead.
+
+Sized against the July 2026 usage report: **$563.63/month net, of which
+$401.03 is workflows this tool gates.**
+
+### Commands
+
+Every command is a dry run until you pass `--apply`.
+
+```bash
+# What would change, and what it saves. Point it at a usage report CSV
+# exported from GitHub billing.
+./ci-local audit --usage ~/Downloads/usageReport.csv
+
+# Rewrite workflows to manual-only (dry run, then apply)
+./ci-local gate
+./ci-local gate --apply
+
+# Undo it — restores the original triggers exactly
+./ci-local restore --apply
+
+# What the local equivalent of each repo's CI is
+./ci-local plan --runnable-only
+
+# Run those checks here
+./ci-local run --repo CI-Server
+./ci-local run --only test --jobs 6 --report /tmp/ci.json
+
+# Run them automatically before every push
+./ci-local hooks install
+
+# Cap artifact retention — storage is billed wherever the job ran, so
+# gating does nothing for it
+./ci-local retention --days 7
+./ci-local retention --days 7 --apply
+
+# Open a PR per repo, gated on a clean worktree off each default branch
+./ci-local ship --usage ~/Downloads/usageReport.csv
+./ci-local ship --apply
+```
+
+### Drift watch
+
+Gating is a snapshot, not a policy. Two things erode it:
+
+- **New workflows are born ungated.** Every new marketplace app ships a
+  `build-<app>.yml` with `on: push`. CI-Marketplace was fully gated and billing
+  again within a day.
+- **Feature branches keep the old triggers.** `push` events evaluate the
+  workflow file *at the pushed commit*, so a branch created before the gating
+  merge still fires the ungated workflows until it rebases. This one cannot be
+  fixed from the default branch — it decays as branches land.
+
+`verify` reads the **remote default branch**, not the local clone, because that
+is what GitHub evaluates triggers from:
+
+```bash
+./ci-local verify --usage ~/Downloads/usageReport.csv   # what is live, and what it costs
+./ci-local verify --save-baseline                       # record expected state
+./ci-local verify --check-drift                         # exit 1 if anything got worse
+./ci-local watch install --hour 9                       # run that check daily
+./ci-local watch status
+./ci-local watch uninstall
+```
+
+Drift is one-directional: gating *more* than the baseline is never reported.
+Only regressions and newly-added ungated workflows fire.
+
+The watch is a launchd agent (macOS) or systemd user timer (Linux), not a
+scheduled GitHub Action — a job that polices Actions spend should not itself
+burn billed minutes, and a workflow living in one repo cannot see the other
+thirty.
+
+### Why `ship` uses worktrees
+
+The workspace clones are shared — dirty, on feature branches, with other agents
+working in them. `ship` never commits from a clone. It creates a throwaway
+worktree off `origin/<default branch>`, gates there, pushes that, and leaves the
+clone exactly as found.
+
+Default branches are resolved per repo, never assumed: CI-Hub, CI-Marketplace
+and CI-Portal default to `dev`; CI-Browser-Extension, CI-Hermes, CI-OpenClaw and
+CI-Tools-Cache-Mounts to `master`. Anything hard-coding `main` targets the wrong
+base or fails outright.
+
+### How gating works
+
+The original trigger block is preserved as a comment directly above the
+replacement, so the change is legible in review and `restore` needs no sidecar
+state:
+
+```yaml
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   push:
+#     branches: [main]
+#   pull_request:
+# <<< ci-local:gated
+on:
+  workflow_dispatch:
+```
+
+Only the `on:` block is touched — the rest of the file stays byte-identical, so
+diffs stay reviewable across dozens of repos. `workflow_dispatch` inputs and
+`workflow_call` are carried across, so manual runs keep their form and reusable
+workflows keep working for their callers.
+
+> **Gating only takes effect once the change reaches the branch the trigger
+> fires on.** A gated workflow sitting in a feature branch still runs on
+> `pull_request`, because GitHub reads that trigger from the base branch.
+
+### Policy
+
+`ci-local.toml` holds the exceptions. Default stance is "gate it".
+
+| Section | Purpose |
+|---|---|
+| `workflows.keep` | Globs left on their automatic triggers — deploy-on-merge and tag-triggered release paths |
+| `workflows.force_gate` | Gated even if `keep` matches — scheduled builds, publish workflows that also fire on every PR |
+| `repos.aliases` | Clone directory → GitHub repo name, for repos renamed upstream (`CI-Applet` → `CI-Capture`) |
+| `checks.<repo>` | `workdir`, `commands`, or `skip` for layouts the detector can't read off disk |
+
+### Local check detection
+
+Detection is evidence-based — a check is only emitted when something on disk
+proves it exists. Package manager comes from the lockfile (which beats a stale
+`packageManager` field). Node, Rust, Flutter, Go and Python are recognised;
+anything else reports "not detected" rather than guessing.
+
+### Tests
+
+```bash
+python3 -m pytest -q
+```
+
+---
+
 ## Overview
 
-This repository provides local CI/CD monitoring tooling for the **[CI-Server](https://github.com/companionintelligence/CI-Server)** repository. It includes a Python daemon that automatically monitors the CI-Server repository for changes, pulls updates when detected, and runs configured setup commands.
+This repository also provides local CI/CD monitoring tooling for the **[CI-Server](https://github.com/companionintelligence/CI-Server)** repository. It includes a Python daemon that automatically monitors the CI-Server repository for changes, pulls updates when detected, and runs configured setup commands.
 
 ### Key Features
 

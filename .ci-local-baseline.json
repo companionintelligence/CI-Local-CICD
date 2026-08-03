@@ -1,0 +1,446 @@
+{
+  "AD4M-Container": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "publish.yml"
+    ]
+  },
+  "CI-Brand-Studio": {
+    "base": "main",
+    "billing": [
+      "ci.yml"
+    ],
+    "known": [
+      "ci.yml"
+    ]
+  },
+  "CI-Browser-Extension": {
+    "base": "master",
+    "billing": [],
+    "known": [
+      "build-and-test.yml",
+      "release.yml",
+      "style-canon-lint.yml",
+      "verify-store-credentials.yml"
+    ]
+  },
+  "CI-Capture": {
+    "base": "main",
+    "billing": [
+      "release.yml"
+    ],
+    "known": [
+      "ci.yml",
+      "packages.yml",
+      "release.yml"
+    ]
+  },
+  "CI-Common": {
+    "base": "main",
+    "billing": [
+      "frontend-tests.yml",
+      "publish-icons.yml",
+      "publish-marketing.yml",
+      "publish-tokens.yml",
+      "publish-ui.yml",
+      "style-canon-lint.yml"
+    ],
+    "known": [
+      "frontend-tests.yml",
+      "publish-icons.yml",
+      "publish-marketing.yml",
+      "publish-tokens.yml",
+      "publish-ui.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Docs": {
+    "base": "main",
+    "billing": [
+      "style-canon-lint.yml"
+    ],
+    "known": [
+      "deploy-cloudflare.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Earth-2": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "CI-Even-Realities": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-GonoPBX": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "build-images.yml"
+    ]
+  },
+  "CI-Hermes": {
+    "base": "master",
+    "billing": [
+      "ci.yml",
+      "docker-publish.yml",
+      "hermes-release-pr.yml",
+      "npm-publish.yml",
+      "tag-on-hermes-merge.yml"
+    ],
+    "known": [
+      "ci.yml",
+      "docker-publish.yml",
+      "hermes-release-pr.yml",
+      "npm-publish.yml",
+      "tag-on-hermes-merge.yml"
+    ]
+  },
+  "CI-Hub": {
+    "base": "dev",
+    "billing": [],
+    "known": [
+      "agent-gates.yml",
+      "app-catalog-fleet.yml",
+      "build-container.yml",
+      "ci.yml",
+      "codeql.yml",
+      "dependency-review.yml",
+      "desktop-build.yml",
+      "desktop-release.yml",
+      "desktop-tests.yml",
+      "e2e-extended.yml",
+      "e2e-fleet.yml",
+      "e2e-mcp.yml",
+      "e2e-platform.yml",
+      "e2e.yml",
+      "integration-tests.yml",
+      "nightly-release.yml",
+      "pr-compliance.yml",
+      "publish-package-managers.yml",
+      "secret-scan.yml",
+      "semver-tag.yml"
+    ]
+  },
+  "CI-Import-Tools": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "docker-publish.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-MaixCAM": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "build_maixcam.yml",
+      "build_maixcam_dev.yml",
+      "build_maixcam_main_pr.yml",
+      "release_maixcam.yml",
+      "release_other_linux.yml",
+      "sync_gitee.yml",
+      "trigger_wiki.yml"
+    ]
+  },
+  "CI-Marketing": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "studio-ci.yml"
+    ]
+  },
+  "CI-Marketplace": {
+    "base": "dev",
+    "billing": [],
+    "known": [
+      "app-onboard.yml",
+      "app-update.yml",
+      "build-ai-job-search.yml",
+      "build-asciiflow.yml",
+      "build-beatsync.yml",
+      "build-blockbench.yml",
+      "build-cosyvoice.yml",
+      "build-freecut.yml",
+      "build-gyroflow.yml",
+      "build-llmfit.yml",
+      "build-louter.yml",
+      "build-opencut.yml",
+      "build-openshell-wrappers.yml",
+      "build-remotion-studio.yml",
+      "build-safeos-api.yml",
+      "build-secondme.yml",
+      "build-torollo.yml",
+      "build-worldmonitor.yml",
+      "ci.yml",
+      "deploy.yml",
+      "pr-compliance.yml"
+    ]
+  },
+  "CI-OMI": {
+    "base": "main",
+    "billing": [
+      "gcp_apps_js.yml",
+      "gcp_frontend.yml",
+      "gcp_personas.yml",
+      "gcp_plugins.yml",
+      "main.yml",
+      "sync-docs.yml"
+    ],
+    "known": [
+      "deploy_docs.yml",
+      "entellegence_issues.yml",
+      "entelligence-pr-reviewer.yml",
+      "gcp_apps_js.yml",
+      "gcp_backend.yml",
+      "gcp_backend_pusher.yml",
+      "gcp_frontend.yml",
+      "gcp_models.yml",
+      "gcp_notifications_job.yml",
+      "gcp_personas.yml",
+      "gcp_plugins.yml",
+      "main.yml",
+      "sync-docs.yml"
+    ]
+  },
+  "CI-OS": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "build-companion-os-iso.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-OpenClaw": {
+    "base": "master",
+    "billing": [],
+    "known": [
+      "ci-hub-plugin-resync.yml",
+      "ci.yml",
+      "docker-publish.yml",
+      "npm-publish.yml",
+      "openclaw-release-pr.yml"
+    ]
+  },
+  "CI-Photo-Time-Machine": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml"
+    ]
+  },
+  "CI-Planning": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "docker-publish.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Portal": {
+    "base": "dev",
+    "billing": [
+      "ci.yml",
+      "dependency-review.yml",
+      "playwright.yml",
+      "secret-scan.yml",
+      "style-canon-lint.yml"
+    ],
+    "known": [
+      "ci.yml",
+      "dependency-review.yml",
+      "deploy.yml",
+      "playwright.yml",
+      "secret-scan.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Public-Website": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "build.yml",
+      "deploy-site.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Server": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "e2e.yml",
+      "migration-integrity-check.yml",
+      "publish.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "CI-Spatial-Companion-WebXR": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "docker-publish.yml",
+      "pages-deploy.yml",
+      "publish-proxy.yml",
+      "style-canon-lint.yml",
+      "test.yml"
+    ]
+  },
+  "CI-Spellbook": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "docker-publish.yml"
+    ]
+  },
+  "CI-Static-Containter-Builder": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "CI-Tools-Cache-Mounts": {
+    "base": "master",
+    "billing": [],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "CI-Web-XR-Scan": {
+    "base": "main",
+    "billing": [
+      "docker-publish.yml"
+    ],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "CI-WebXR-Scan-Meta": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml"
+    ]
+  },
+  "CI-WebXR-Time-Machine": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "deploy-cloudflare-pages-preview.yml",
+      "deploy-cloudflare-pages.yml",
+      "docker-publish.yml"
+    ]
+  },
+  "CI-XR-Scan-Web-Unity": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "unity-tests.yml",
+      "web-tests.yml"
+    ]
+  },
+  "Companion-Pipe": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "benchmark.yml",
+      "ci.yml",
+      "docs.yml",
+      "e2e-macos.yml",
+      "e2e-test.yml",
+      "eval-diarization.yml",
+      "eval-meeting-detection.yml",
+      "gitleaks.yml",
+      "privacy-filter-release.yml",
+      "release-app.yml",
+      "release-browser-extension.yml",
+      "release-cli.yml",
+      "release-enterprise.yml",
+      "release-mcp.yml",
+      "sdk-release.yml",
+      "sdk.yml",
+      "sentry-cleanup.yml",
+      "style-canon-lint.yml",
+      "style.yml",
+      "sync-skills.yml",
+      "test-cli-npm.yml",
+      "test-frontend.yml",
+      "test-signing.yml",
+      "windows-integration-test.yml"
+    ]
+  },
+  "JustInCase": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "docker-publish.yml",
+      "style-canon-lint.yml"
+    ]
+  },
+  "Local-Bench": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "Torollo": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "ci.yml",
+      "integration.yml"
+    ]
+  },
+  "ZARCHIVE-CI-Connect": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "main.yaml"
+    ]
+  },
+  "ZARCHIVE-CI-Mobile-Flutter": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "main.yaml"
+    ]
+  },
+  "ci-time-machine": {
+    "base": "feat/m1-m2-initial-monorepo",
+    "billing": [],
+    "known": [
+      "docker-publish.yml"
+    ]
+  },
+  "companionintelligence.github.io": {
+    "base": "main",
+    "billing": [],
+    "known": [
+      "style-canon-lint.yml"
+    ]
+  },
+  "systeminformation": {
+    "base": "master",
+    "billing": [],
+    "known": [
+      "codeql.yml",
+      "release.yml",
+      "test.yml"
+    ]
+  }
+}
