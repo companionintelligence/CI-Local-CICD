@@ -9,6 +9,7 @@ because a plan that invents commands produces failures nobody trusts.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -56,6 +57,8 @@ class RepoPlan:
     checks: List[Check] = field(default_factory=list)
     install: Optional[Check] = None
     notes: List[str] = field(default_factory=list)
+    # Nested checkouts found inside the repo; results are unreliable if set.
+    contaminated: List[str] = field(default_factory=list)
 
     @property
     def runnable(self) -> bool:
@@ -98,7 +101,136 @@ def _node_install(manager: str) -> List[str]:
     }[manager]
 
 
+def workspace_globs(pkg: Dict, path: Path) -> List[str]:
+    """Workspace patterns from package.json, or pnpm-workspace.yaml."""
+    raw = pkg.get("workspaces")
+    if isinstance(raw, dict):
+        raw = raw.get("packages")
+    if isinstance(raw, list):
+        return [str(p) for p in raw]
+
+    pnpm = path / "pnpm-workspace.yaml"
+    if pnpm.exists():
+        globs = []
+        try:
+            in_packages = False
+            for line in pnpm.read_text(encoding="utf-8").splitlines():
+                if line.startswith("packages:"):
+                    in_packages = True
+                    continue
+                if in_packages:
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        globs.append(stripped[2:].strip().strip("\"'"))
+                    elif stripped and not stripped.startswith("#"):
+                        break
+        except OSError:
+            return []
+        return globs
+    return []
+
+
+def workspace_checks(path: Path, pkg: Dict, manager: str) -> List[Check]:
+    """Checks defined by workspace packages rather than the root manifest.
+
+    A monorepo root often has only `lint`; the tests live in the packages. The
+    root manifest alone reports "no test script", which reads as "this repo has
+    no tests" - wrong, and exactly the case that made CI-Server's generated
+    docs say lint-only for a repo that was the single biggest line on the bill.
+    """
+    globs = workspace_globs(pkg, path)
+    if not globs:
+        return []
+
+    checks: List[Check] = []
+    seen = set()
+    for pattern in globs:
+        for child in sorted(path.glob(pattern)):
+            if not child.is_dir():
+                continue
+            child_pkg = _read_json(child / "package.json")
+            if not child_pkg:
+                continue
+            name = child_pkg.get("name")
+            scripts = child_pkg.get("scripts", {}) or {}
+            if not name:
+                continue
+            for slot, aliases in NODE_CHECKS:
+                if slot == "build":
+                    continue  # building every package is a release concern
+                for alias in aliases:
+                    body = scripts.get(alias)
+                    if not body or (slot == "test" and PLACEHOLDER_TEST in body):
+                        continue
+                    key = (name, slot)
+                    if key in seen:
+                        break
+                    seen.add(key)
+                    checks.append(Check(
+                        f"{slot}:{name}",
+                        _workspace_run(manager, str(name), alias),
+                    ))
+                    break
+    return checks
+
+
+def _workspace_run(manager: str, package: str, script: str) -> List[str]:
+    if manager == "pnpm":
+        return ["pnpm", "--filter", package, "run", script]
+    if manager == "yarn":
+        return ["yarn", "workspace", package, script]
+    if manager == "bun":
+        return ["bun", "run", "--filter", package, script]
+    return ["npm", "run", "--silent", script, "--workspace", package]
+
+
+def makefile_targets(path: Path) -> List[str]:
+    """Target names declared in a Makefile, ignoring pattern and .PHONY lines."""
+    makefile = path / "Makefile"
+    if not makefile.exists():
+        return []
+    targets = []
+    try:
+        for line in makefile.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"^([a-zA-Z][\w-]*)\s*:(?!=)", line)
+            if match:
+                targets.append(match.group(1))
+    except OSError:
+        return []
+    return targets
+
+
+def nested_checkouts(path: Path, limit: int = 200) -> List[str]:
+    """Checkouts living *inside* the repo, relative to it.
+
+    Agent sessions create git worktrees under `.claude/worktrees/`, so a repo
+    can contain dozens of parallel copies of itself. Every tree-walking tool -
+    eslint, tsc, vitest, ripgrep - then silently multiplies its work by that
+    count and reports findings for code the developer never wrote.
+
+    Measured on CI-Server: 18 nested checkouts turned a clean tree into 19,096
+    lint problems. Hosted CI never saw it, because a fresh clone has none of
+    them. This is a property of how the workspace is driven, not of any repo,
+    so it is detected here rather than patched into each repo's linter config.
+    """
+    found: List[str] = []
+    for parent in (".claude/worktrees", ".worktrees"):
+        root = path / parent
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if (child / ".git").exists():
+                found.append(f"{parent}/{child.name}")
+                if len(found) >= limit:
+                    return found
+    return found
+
+
 def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
+    return _warn_nested(_plan_for(repo, path, override))
+
+
+def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
     """Build the local check plan for a single repo.
 
     ``override`` is a :class:`local_ci.policy.RepoOverride`, applied before
@@ -150,8 +282,35 @@ def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
                 break
             else:
                 plan.notes.append(f"no {slot} script")
+
+        # Workspace packages carry the tests in a monorepo. Only look when the
+        # root is missing a slot, so a root-level `test` that already fans out
+        # is not duplicated per package.
+        root_slots = {c.name for c in plan.checks}
+        if "test" not in root_slots or "typecheck" not in root_slots:
+            extra = [
+                c for c in workspace_checks(path, pkg, manager)
+                if c.name.split(":", 1)[0] not in root_slots
+            ]
+            if extra:
+                plan.checks.extend(extra)
+                packages = sorted({c.name.split(":", 1)[1] for c in extra})
+                plan.notes = [n for n in plan.notes
+                              if n not in ("no test script", "no typecheck script")]
+                plan.notes.append(
+                    f"{len(extra)} check(s) from {len(packages)} workspace package(s)"
+                )
+
         if not (path / "node_modules").exists():
             plan.notes.append("node_modules missing - install required")
+        targets = makefile_targets(path)
+        if targets:
+            interesting = [t for t in ("build", "dev", "test", "up", "reset")
+                           if t in targets]
+            if interesting:
+                plan.notes.append(
+                    "Makefile also provides: " + ", ".join(f"make {t}" for t in interesting)
+                )
         return plan
 
     if (path / "Cargo.toml").exists():
@@ -192,6 +351,18 @@ def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
 
     plan = RepoPlan(repo, path, stack="unknown")
     plan.notes.append("no recognised project manifest")
+    return plan
+
+
+def _warn_nested(plan: RepoPlan) -> RepoPlan:
+    nested = nested_checkouts(plan.path)
+    if nested:
+        plan.contaminated = nested
+        plan.notes.append(
+            f"WARNING: {len(nested)} nested checkout(s) inside this repo "
+            f"({nested[0]}...). Tree-walking checks will scan them too and "
+            f"report findings for code you did not write."
+        )
     return plan
 
 

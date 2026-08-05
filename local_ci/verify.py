@@ -229,6 +229,42 @@ def audit_repo(repo_slug: str, policy: Policy, local_name: str = "") -> RepoAudi
     return audit
 
 
+def audit_worktree(
+    worktree, local_name: str, policy: Policy, base: str
+) -> RepoAudit:
+    """Same classification as :func:`audit_repo`, read off disk.
+
+    ``ship`` already has a checkout in hand; going back to the API would be
+    slower and could disagree with the branch it is about to commit.
+    """
+    from .workflows import read_workflow
+
+    audit = RepoAudit(local_name, base)
+    wf_dir = worktree / ".github" / "workflows"
+    if not wf_dir.is_dir():
+        return audit
+    for path in sorted(wf_dir.iterdir()):
+        if not path.is_file() or path.suffix not in (".yml", ".yaml"):
+            continue
+        try:
+            text = read_workflow(path)
+        except OSError:
+            continue
+        try:
+            triggers = declared_triggers(text)
+        except WorkflowParseError:
+            triggers = []
+        audit.workflows.append(RemoteWorkflow(
+            name=path.name,
+            gated=is_gated(text),
+            triggers=triggers,
+            kept=policy.matches_keep(f"{local_name}/{path.name}"),
+            title=workflow_title(text) or path.name,
+            inputs=dispatch_inputs(text),
+        ))
+    return audit
+
+
 def audit_all(
     repos: List[Tuple[str, str]], policy: Policy, workers: int = 6
 ) -> List[RepoAudit]:

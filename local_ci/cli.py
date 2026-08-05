@@ -309,6 +309,7 @@ def cmd_ship(args: argparse.Namespace) -> int:
             retention_days=args.retention_days,
             concurrency=args.concurrency,
             gating=not args.no_gate,
+            write_docs=args.write_docs,
         )
         if result.status == "shipped":
             shipped += 1
@@ -323,6 +324,8 @@ def cmd_ship(args: argparse.Namespace) -> int:
             parts.append(f"{len(result.retention)} retention")
         if result.concurrency:
             parts.append(f"{len(result.concurrency)} concurrency")
+        if result.docs:
+            parts.append("docs")
         count = f"{', '.join(parts):<22}" if parts else " " * 22
         print(f"  {result.status:<8} {result.repo:<30} {count}  {result.detail}")
 
@@ -473,10 +476,34 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     return 0
 
 
+REPO_HELP = "limit to this repo (repeatable); valid before or after the subcommand"
+
+
+def add_command(sub, name: str, **kwargs) -> argparse.ArgumentParser:
+    """A subparser that accepts ``--repo`` and refuses abbreviated flags.
+
+    Both halves fix the same footgun. argparse only honours a *global* flag
+    before the subcommand, so ``run --repo X`` never reached ``discover_repos``
+    - and because ``--repo`` is a unique prefix of ``run``'s ``--report``, it
+    was silently absorbed as a report path instead of erroring. The run then
+    quietly covered all 33 workspace repos, which is what the pre-push hook was
+    doing on every push. ``allow_abbrev=False`` stops any flag being swallowed
+    by a longer one; the per-subcommand ``--repo`` makes the order people
+    actually type work. ``SUPPRESS`` keeps the global value when this one is
+    absent, so ``ci-local --repo X run`` still scopes correctly.
+    """
+    parser = sub.add_parser(name, allow_abbrev=False, **kwargs)
+    parser.add_argument(
+        "--repo", action="append", default=argparse.SUPPRESS, help=REPO_HELP,
+    )
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ci-local", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument(
@@ -487,32 +514,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy", type=Path, default=REPO_ROOT / DEFAULT_POLICY_FILE,
         help="policy file listing workflows to leave alone",
     )
-    parser.add_argument(
-        "--repo", action="append",
-        help="limit to this repo (repeatable)",
-    )
+    parser.add_argument("--repo", action="append", help=REPO_HELP)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    audit = sub.add_parser("audit", help="show what gating would do")
+    audit = add_command(sub, "audit", help="show what gating would do")
     audit.add_argument("--usage", type=Path, help="GitHub usage report CSV")
     audit.set_defaults(func=cmd_audit)
 
-    gate_p = sub.add_parser("gate", help="rewrite workflows to manual-only")
+    gate_p = add_command(sub, "gate", help="rewrite workflows to manual-only")
     gate_p.add_argument("--apply", action="store_true", help="write changes")
     gate_p.set_defaults(func=cmd_gate)
 
-    restore_p = sub.add_parser("restore", help="undo gating")
+    restore_p = add_command(sub, "restore", help="undo gating")
     restore_p.add_argument("--apply", action="store_true", help="write changes")
     restore_p.set_defaults(func=cmd_restore)
 
-    plan_p = sub.add_parser("plan", help="show detected local checks")
+    plan_p = add_command(sub, "plan", help="show detected local checks")
     plan_p.add_argument(
         "--runnable-only", action="store_true",
         help="hide repos with no detected checks",
     )
     plan_p.set_defaults(func=cmd_plan)
 
-    run_p = sub.add_parser("run", help="run local checks")
+    run_p = add_command(sub, "run", help="run local checks")
     run_p.add_argument("--only", help="comma-separated check names")
     run_p.add_argument("--install", action="store_true", help="force dependency install")
     run_p.add_argument("--jobs", type=int, default=4, help="repos in parallel")
@@ -521,8 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--report", type=Path, help="write a JSON report here")
     run_p.set_defaults(func=cmd_run)
 
-    ship_p = sub.add_parser(
-        "ship", help="gate on a clean worktree and open a PR per repo"
+    ship_p = add_command(
+        sub, "ship", help="gate on a clean worktree and open a PR per repo"
     )
     ship_p.add_argument("--apply", action="store_true",
                         help="push branches and open PRs")
@@ -532,6 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--retention-days", type=int, default=None,
         help="also cap artifact retention-days in the same PR",
     )
+    ship_p.add_argument("--write-docs", action="store_true",
+                        help=f"also write a per-repo docs/CI.md")
     ship_p.add_argument("--no-gate", action="store_true",
                         help="skip trigger gating (e.g. concurrency-only PRs)")
     ship_p.add_argument("--concurrency", action="store_true",
@@ -545,15 +571,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ship_p.set_defaults(func=cmd_ship)
 
-    ret_p = sub.add_parser(
-        "retention", help="cap artifact retention-days (storage cost)"
+    ret_p = add_command(
+        sub, "retention", help="cap artifact retention-days (storage cost)"
     )
     ret_p.add_argument("--days", type=int, default=DEFAULT_RETENTION_DAYS)
     ret_p.add_argument("--apply", action="store_true", help="write changes")
     ret_p.set_defaults(func=cmd_retention)
 
-    verify_p = sub.add_parser(
-        "verify", help="audit what is live on each default branch"
+    verify_p = add_command(
+        sub, "verify", help="audit what is live on each default branch"
     )
     verify_p.add_argument("--usage", type=Path, help="usage CSV, to cite cost")
     verify_p.add_argument("--baseline", type=Path,
@@ -566,22 +592,22 @@ def build_parser() -> argparse.ArgumentParser:
                           help="send a desktop notification on drift")
     verify_p.set_defaults(func=cmd_verify)
 
-    docs_p = sub.add_parser(
-        "docs", help="regenerate the developer runbook"
+    docs_p = add_command(
+        sub, "docs", help="regenerate the developer runbook"
     )
     docs_p.add_argument("--output", type=Path,
                         default=REPO_ROOT / "RUNBOOK.md")
     docs_p.set_defaults(func=cmd_docs)
 
-    watch_p = sub.add_parser(
-        "watch", help="install/remove the recurring drift check"
+    watch_p = add_command(
+        sub, "watch", help="install/remove the recurring drift check"
     )
     watch_p.add_argument("action", choices=["install", "uninstall", "status"])
     watch_p.add_argument("--hour", type=int, default=9,
                          help="local hour to run at (default 9)")
     watch_p.set_defaults(func=cmd_watch)
 
-    hooks_p = sub.add_parser("hooks", help="manage the pre-push hook")
+    hooks_p = add_command(sub, "hooks", help="manage the pre-push hook")
     hooks_p.add_argument("action", choices=["install", "uninstall"])
     hooks_p.add_argument("--only", help="comma-separated checks for the hook")
     hooks_p.add_argument(

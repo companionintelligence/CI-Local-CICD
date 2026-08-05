@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 from pathlib import Path
 
 import pytest
 
+from local_ci.cli import build_parser
 from local_ci.hooks import HOOK_NAME, SENTINEL, git_dir, install, render_hook, uninstall
 
 CLI = Path("/opt/ci/ci-local")
@@ -136,3 +138,39 @@ def test_rendered_hook_is_valid_shell():
     proc = subprocess.run(["bash", "-n"], input=body, text=True,
                           capture_output=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def ci_local_argv(body: str) -> list:
+    """The arguments the hook actually hands to ``ci-local``."""
+    # The invocation is the only line where "$CI_LOCAL" is followed by flags;
+    # the existence guard has `"$CI_LOCAL" ]` and the hint echoes it unquoted.
+    line = next(l for l in body.splitlines() if '"$CI_LOCAL" --' in l)
+    return shlex.split(line.split('"$CI_LOCAL"', 1)[1])
+
+
+def test_hook_command_line_scopes_to_this_repo():
+    """Parse the hook's own command line with the real parser.
+
+    This is the seam that broke: the hook body is a string in one module and
+    the flags it uses are defined in another, so nothing checked that they
+    meant what the hook intended. They did not - ``--repo`` sat after the
+    subcommand, where argparse absorbed it as an abbreviation of ``--report``,
+    leaving the run unscoped across every repo in the workspace.
+    """
+    argv = ci_local_argv(render_hook("CI-Server", CLI, "python3", ["lint", "test"]))
+    args = build_parser().parse_args(argv)
+    assert args.command == "run"
+    assert args.repo == ["CI-Server"]
+    assert args.only == "lint,test"
+    assert args.report is None  # not misread as a report path
+    assert args.quiet is True
+
+
+def test_failure_hint_is_a_command_that_parses():
+    """The 're-run with:' line is the one people copy after a red push."""
+    body = render_hook("CI-Server", CLI, "python3", ["lint", "test"])
+    hint = next(l for l in body.splitlines() if "re-run with:" in l)
+    argv = shlex.split(hint.split("$CI_LOCAL", 1)[1].rstrip('" >&2'))
+    args = build_parser().parse_args(argv)
+    assert args.repo == ["CI-Server"]
+    assert args.command == "run"

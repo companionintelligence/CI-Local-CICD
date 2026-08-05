@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from local_ci.cli import load_usage, main, workflow_files
+from local_ci.cli import build_parser, load_usage, main, workflow_files
 
 from .test_workflows import MANUAL_ONLY, MAPPING
 
@@ -150,6 +150,33 @@ class TestRunCommand:
         capsys.readouterr()
         assert json.loads(report.read_text(encoding="utf-8"))["repos"] == 1
 
+    def test_repo_filter_after_the_subcommand_limits_the_run(
+        self, tmp_path, policy_file, capsys
+    ):
+        """`run --repo X` must run X, not the whole workspace.
+
+        It used to run everything: `--repo` is a global flag, and after the
+        subcommand argparse matched it to `run`'s `--report` instead. The
+        pre-push hook wrote exactly this form.
+        """
+        for name in ("CI-Server", "CI-Hub"):
+            repo = tmp_path / name
+            (repo / ".git").mkdir(parents=True)
+            (repo / "package.json").write_text(
+                json.dumps({"name": name, "scripts": {"test": "exit 0"}}),
+                encoding="utf-8",
+            )
+            (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+            (repo / "node_modules").mkdir()
+        report = tmp_path / "report.json"
+        main([
+            "--workspace", str(tmp_path), "--policy", str(policy_file),
+            "run", "--repo", "CI-Server", "--jobs", "1", "--report", str(report),
+        ])
+        capsys.readouterr()
+        summary = json.loads(report.read_text(encoding="utf-8"))
+        assert [r["repo"] for r in summary["results"]] == ["CI-Server"]
+
     def test_no_runnable_repos_is_an_error(self, tmp_path, policy_file, capsys):
         (tmp_path / "empty" / ".git").mkdir(parents=True)
         code = main([
@@ -183,6 +210,39 @@ class TestHooksCommand:
         ])
         assert "no local checks detected" in capsys.readouterr().out
         assert not (repo / ".git" / "hooks" / "pre-push").exists()
+
+
+class TestRepoScoping:
+    """`--repo` in either position, and no flag silently standing in for another."""
+
+    @pytest.mark.parametrize("argv", [
+        ["run", "--repo", "CI-Hub"],
+        ["--repo", "CI-Hub", "run"],
+    ])
+    def test_either_position_scopes(self, argv):
+        args = build_parser().parse_args(argv)
+        assert args.repo == ["CI-Hub"]
+        assert args.report is None
+
+    @pytest.mark.parametrize("command", ["plan", "gate", "restore", "audit", "hooks"])
+    def test_every_subcommand_takes_repo(self, command):
+        extra = ["install"] if command == "hooks" else []
+        args = build_parser().parse_args([command, *extra, "--repo", "CI-Hub"])
+        assert args.repo == ["CI-Hub"]
+
+    def test_report_still_takes_a_path(self, tmp_path):
+        args = build_parser().parse_args(["run", "--report", str(tmp_path / "r.json")])
+        assert args.report == tmp_path / "r.json"
+
+    @pytest.mark.parametrize("flag", ["--rep", "--repor", "--jo", "--tim"])
+    def test_abbreviated_flags_are_rejected(self, flag):
+        """An abbreviation that resolves to a different flag is how this broke."""
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["run", flag, "x"])
+
+    def test_unknown_flags_are_rejected(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["run", "--nonsense", "x"])
 
 
 class TestCostAttribution:
