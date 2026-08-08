@@ -22,13 +22,26 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .concurrency import add_concurrency
+from .detect import plan_for
+from .docs import render_repo_doc
 from .policy import Policy, classify
 from .retention import apply_retention
+from .verify import audit_worktree
 from .workflows import WorkflowParseError, gate, read_workflow, write_workflow
 
 BRANCH = "chore/gate-actions-to-manual"
 PR_TITLE = "chore(ci): gate automatic workflow triggers to manual"
 CONCURRENCY_TITLE = "chore(ci): cancel superseded workflow runs"
+DOCS_TITLE = "docs(ci): how to run tests and releases now that triggers are manual"
+DOCS_BODY = """\
+Automatic workflow triggers in this repo are gated, so pushing no longer starts
+a GitHub-hosted run. `docs/CI.md` records what replaced it: the command to run
+this repo's checks on local hardware, and the exact `gh workflow run` line for
+every manual workflow including its required inputs.
+
+Generated from this branch's workflow files by `ci-local docs`.
+"""
+DOC_FILE = "docs/CI.md"
 CONCURRENCY_BODY = """\
 Without a `concurrency` block, pushing three commits to a branch runs the whole
 suite three times and pays for all three. The group is scoped to the ref so
@@ -83,6 +96,7 @@ class ShipResult:
     workflows: List[str] = field(default_factory=list)
     retention: List[str] = field(default_factory=list)
     concurrency: List[str] = field(default_factory=list)
+    docs: bool = False
     pr_url: str = ""
     commands: List[str] = field(default_factory=list)
 
@@ -179,8 +193,14 @@ def gate_worktree(
 def pr_body(
     repo: str, workflows: List[str], saved: float,
     capped: Optional[List[str]] = None, concurrent: Optional[List[str]] = None,
+    docs: bool = False,
 ) -> str:
     capped, concurrent = capped or [], concurrent or []
+    if docs and not workflows and not concurrent and not capped:
+        return (f"## What\n\nAdds `{DOC_FILE}`.\n\n{DOCS_BODY}\n"
+                "## Why generated\n\nA hand-written version goes stale the "
+                "first time someone adds a workflow. Regenerate with "
+                "`ci-local docs`.\n")
     lines = ["## What", ""]
     if concurrent:
         lines += [
@@ -236,9 +256,11 @@ def pr_body(
 
 def commit_message(
     workflows: List[str], capped: Optional[List[str]] = None,
-    concurrent: Optional[List[str]] = None,
+    concurrent: Optional[List[str]] = None, docs: bool = False,
 ) -> str:
     capped, concurrent = capped or [], concurrent or []
+    if docs and not workflows and not concurrent and not capped:
+        return f"{DOCS_TITLE}\n\n{DOCS_BODY}"
     if concurrent and not workflows:
         subject = CONCURRENCY_TITLE
         body = CONCURRENCY_BODY
@@ -250,6 +272,8 @@ def commit_message(
             tail += f" Added concurrency to {len(concurrent)}."
     if capped:
         tail += f" Capped artifact retention on {len(capped)}."
+    if docs:
+        tail += f" Documented in {DOC_FILE}."
     return f"{subject}\n\n{body}\n{tail}"
 
 
@@ -262,6 +286,7 @@ def ship_repo(
     retention_days: Optional[int] = None,
     concurrency: bool = False,
     gating: bool = True,
+    write_docs: bool = False,
     apply: bool = False,
     run: Runner = real_runner,
 ) -> ShipResult:
@@ -308,7 +333,21 @@ def ship_repo(
         result.workflows = changed
         result.retention = capped
         result.concurrency = concurrent
-        if not changed and not capped and not concurrent:
+
+        if write_docs:
+            audit = audit_worktree(worktree, repo, policy, base)
+            if audit.workflows:
+                doc = worktree / DOC_FILE
+                doc.parent.mkdir(parents=True, exist_ok=True)
+                text = render_repo_doc(
+                    audit, plan_for(repo, worktree, policy.override_for(repo)),
+                    repo_slug.split("/")[-1],
+                )
+                if not doc.exists() or doc.read_text(encoding="utf-8") != text:
+                    doc.write_text(text, encoding="utf-8")
+                    result.docs = True
+
+        if not changed and not capped and not concurrent and not result.docs:
             result.detail = f"nothing to change on {base}"
             return result
 
@@ -318,12 +357,13 @@ def ship_repo(
             saved = sum(usage.get((github_name, name), 0.0) for name in changed)
 
         commands = [
-            ["git", "add", "--", ".github/workflows"],
+            ["git", "add", "--", ".github/workflows", DOC_FILE]
+            if write_docs else ["git", "add", "--", ".github/workflows"],
             # --no-verify here too: a fresh worktree has no node_modules, so
             # a husky/lint-staged pre-commit hook fails outright. This commit is
             # workflow YAML only and never needs those hooks.
             ["git", "commit", "--no-verify", "-m",
-             commit_message(changed, capped, concurrent)],
+             commit_message(changed, capped, concurrent, result.docs)],
             # Likewise for push: the pre-push hook we install runs the repo's
             # whole lint/test suite, so shipping would deadlock on its own hook.
             ["git", "push", "--no-verify", "--force-with-lease", "-u",
@@ -346,7 +386,8 @@ def ship_repo(
         pr = run(
             ["gh", "pr", "create", "--repo", repo_slug, "--base", base,
              "--head", branch, "--title", PR_TITLE,
-             "--body", pr_body(repo, changed, saved, capped, concurrent)],
+             "--body", pr_body(repo, changed, saved, capped, concurrent,
+                               result.docs)],
             worktree,
         )
         if not pr.ok:

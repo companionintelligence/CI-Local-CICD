@@ -118,3 +118,43 @@ class TestDrift:
     def test_repo_disappearing_is_not_drift(self):
         base = {"A": {"base": "main", "billing": ["x.yml"], "known": ["x.yml"]}}
         assert find_drift(base, {}) == []
+
+
+class TestAuditWorktree:
+    """`ship` audits the checkout it is about to commit, not the API."""
+
+    def _worktree(self, tmp_path, files):
+        d = tmp_path / ".github" / "workflows"
+        d.mkdir(parents=True)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8")
+        return tmp_path
+
+    def test_reads_workflows_from_disk(self, tmp_path):
+        from local_ci.verify import audit_worktree
+
+        wt = self._worktree(tmp_path, {
+            "ci.yml": "name: CI\non:\n  push:\n    branches: [main]\njobs: {}\n",
+            "notes.md": "ignored",
+        })
+        audit = audit_worktree(wt, "CI-Hub", Policy(), "dev")
+        assert audit.base == "dev"
+        assert [w.name for w in audit.workflows] == ["ci.yml"]
+        assert audit.workflows[0].title == "CI"
+        assert audit.workflows[0].status == "BILLING"
+
+    def test_picks_up_dispatch_inputs(self, tmp_path):
+        from local_ci.verify import audit_worktree
+
+        wt = self._worktree(tmp_path, {"release.yml": (
+            "name: Release\non:\n  workflow_dispatch:\n    inputs:\n"
+            "      tag:\n        required: true\n        type: string\njobs: {}\n"
+        )})
+        audit = audit_worktree(wt, "X", Policy(), "main")
+        assert [i.name for i in audit.workflows[0].inputs] == ["tag"]
+        assert audit.workflows[0].inputs[0].required
+
+    def test_missing_workflows_dir(self, tmp_path):
+        from local_ci.verify import audit_worktree
+
+        assert audit_worktree(tmp_path, "X", Policy(), "main").workflows == []

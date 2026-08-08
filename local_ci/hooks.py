@@ -16,6 +16,13 @@ from typing import List, Optional
 HOOK_NAME = "pre-push"
 SENTINEL = "# managed-by: ci-local"
 
+# `--repo` precedes the subcommand: it is a global flag, and the whole point of
+# the hook is that it runs *this* repo's checks. Getting that wrong scoped every
+# push to all 33 workspace repos - 37 minutes of unrelated, mostly-red output
+# instead of 26 seconds - which teaches people to reach for SKIP_LOCAL_CI=1.
+# `ci-local` now also accepts `--repo` after the subcommand, so both orders
+# work, but the canonical global-first form is what gets written here.
+
 HOOK_TEMPLATE = """#!/usr/bin/env bash
 {sentinel}
 # Runs this repo's checks locally instead of on billed GitHub-hosted runners.
@@ -34,12 +41,12 @@ if [ ! -x "$CI_LOCAL" ] && [ ! -f "$CI_LOCAL" ]; then
 fi
 
 echo "local-ci: running {checks} for {repo}"
-"{python}" "$CI_LOCAL" run --repo "{repo}" --only "{checks}" --quiet
+"{python}" "$CI_LOCAL" --repo "{repo}" run --only "{checks}" --quiet
 status=$?
 if [ $status -ne 0 ]; then
   echo "" >&2
   echo "local-ci: checks failed - push aborted." >&2
-  echo "          re-run with: {python} $CI_LOCAL run --repo {repo}" >&2
+  echo "          re-run with: {python} $CI_LOCAL --repo {repo} run" >&2
   echo "          bypass with: SKIP_LOCAL_CI=1 git push" >&2
 fi
 exit $status

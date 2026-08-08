@@ -155,3 +155,45 @@ class TestRender:
         out = render([RepoAudit("X", "main", workflows=[wf("ci.yml")])], {}, {})
         assert out.endswith("\n")
         assert not out.endswith("\n\n")
+
+
+class TestRepoDoc:
+    def test_is_self_contained(self):
+        """A pointer into another private repo is not documentation."""
+        from local_ci.docs import render_repo_doc
+
+        audit = RepoAudit("CI-Hub", "dev", workflows=[
+            wf("ci.yml", title="Hub CI"),
+            wf("release.yml", title="Release",
+               inputs=[DispatchInput("tag", required=True)]),
+        ])
+        out = render_repo_doc(audit, plan("CI-Hub"), "CI-Hub")
+        assert out.startswith("# Running CI for this repo")
+        assert "gh workflow run ci.yml" in out
+        assert "gh workflow run release.yml" in out
+        assert "-f tag=" in out
+        assert "ci-local run --repo CI-Hub" in out
+
+    def test_does_not_repeat_the_repo_heading(self):
+        from local_ci.docs import render_repo_doc
+
+        audit = RepoAudit("CI-Hub", "dev", workflows=[wf("ci.yml")])
+        out = render_repo_doc(audit, None, "CI-Hub")
+        assert "## CI-Hub" not in out
+        assert "Default branch: `dev`" in out
+
+    def test_explains_why_and_says_generated(self):
+        from local_ci.docs import render_repo_doc
+
+        audit = RepoAudit("X", "main", workflows=[wf("ci.yml")])
+        out = render_repo_doc(audit, None, "X")
+        assert "gated" in out
+        assert "do not hand-edit" in out.lower()
+        assert "--ref" in out
+
+    def test_ends_with_single_newline(self):
+        from local_ci.docs import render_repo_doc
+
+        audit = RepoAudit("X", "main", workflows=[wf("ci.yml")])
+        out = render_repo_doc(audit, None, "X")
+        assert out.endswith("\n") and not out.endswith("\n\n")

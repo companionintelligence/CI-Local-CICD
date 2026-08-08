@@ -152,3 +152,39 @@ def render(
         body.append("---")
         body.append("")
     return "\n".join(body).rstrip() + "\n"
+
+
+REPO_DOC_HEADER = """\
+# Running CI for this repo
+
+Automatic workflow triggers in this repository are **gated**: pushing does not
+start a GitHub-hosted run any more. Checks run on local hardware, and the
+workflows that remain are started deliberately.
+
+Why: GitHub Actions was costing the org $563/month, almost all of it hosted
+compute for checks that run just as well on hardware we already own.
+
+Starting a gated workflow needs the [`gh` CLI](https://cli.github.com) and push
+access. `--ref` matters - the workflow file is read from that branch, so a
+workflow that only exists on your feature branch must be dispatched against it.
+
+Full cross-repo runbook: `CI-Local-CICD/RUNBOOK.md` (regenerate with
+`ci-local docs`). This file is generated - do not hand-edit.
+
+---
+
+"""
+
+
+def render_repo_doc(audit, plan, slug: str) -> str:
+    """A standalone `docs/CI.md` for one repo.
+
+    Self-contained rather than a link to the central runbook: the runbook lives
+    in a different private repo, and a pointer a dev cannot open is not
+    documentation.
+    """
+    body = render_repo(audit, plan, slug)
+    # Drop the duplicated `## <repo>` heading - the file is already about it.
+    while body and (body[0].startswith("## ") or not body[0].strip()):
+        body.pop(0)
+    return REPO_DOC_HEADER + "\n".join(body).rstrip() + "\n"

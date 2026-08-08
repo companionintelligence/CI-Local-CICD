@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -12,8 +13,11 @@ from local_ci.detect import (
     NODE_INSTALL_MARKERS,
     detect_node_manager,
     discover_repos,
+    makefile_targets,
+    nested_checkouts,
     node_install_reason,
     plan_for,
+    workspace_globs,
 )
 
 
@@ -304,3 +308,186 @@ class TestOverrides:
         plan = plan_for("repo", root, RepoOverride(skip=True))
         assert not plan.runnable
         assert plan.stack == "skipped"
+
+
+class TestWorkspaceGlobs:
+    def test_array_form(self):
+        assert workspace_globs({"workspaces": ["packages/*"]}, Path("/x")) == ["packages/*"]
+
+    def test_object_form(self):
+        pkg = {"workspaces": {"packages": ["apps/*", "libs/*"], "nohoist": []}}
+        assert workspace_globs(pkg, Path("/x")) == ["apps/*", "libs/*"]
+
+    def test_pnpm_workspace_yaml(self, tmp_path):
+        (tmp_path / "pnpm-workspace.yaml").write_text(
+            "packages:\n  - 'apps/*'\n  - \"libs/*\"\n", encoding="utf-8")
+        assert workspace_globs({}, tmp_path) == ["apps/*", "libs/*"]
+
+    def test_pnpm_yaml_stops_at_next_key(self, tmp_path):
+        (tmp_path / "pnpm-workspace.yaml").write_text(
+            "packages:\n  - 'apps/*'\nonlyBuiltDependencies:\n  - esbuild\n",
+            encoding="utf-8")
+        assert workspace_globs({}, tmp_path) == ["apps/*"]
+
+    def test_no_workspaces(self, tmp_path):
+        assert workspace_globs({}, tmp_path) == []
+
+
+def _workspace_repo(tmp_path, manager_lockfile, root_scripts, packages):
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "root", "scripts": root_scripts,
+        "workspaces": ["packages/*"],
+    }), encoding="utf-8")
+    (tmp_path / manager_lockfile).write_text("", encoding="utf-8")
+    for name, scripts in packages.items():
+        d = tmp_path / "packages" / name.split("/")[-1]
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(
+            json.dumps({"name": name, "scripts": scripts}), encoding="utf-8")
+    return tmp_path
+
+
+class TestWorkspaceChecks:
+    def test_finds_tests_in_packages(self, tmp_path):
+        """The CI-Server case: root has lint only, tests live in packages."""
+        repo = _workspace_repo(tmp_path, "yarn.lock", {"lint": "eslint"},
+                               {"@ci/be-api": {"test": "vitest", "typecheck": "tsc"}})
+        plan = plan_for("CI-Server", repo)
+        names = [c.name for c in plan.checks]
+        assert "lint" in names
+        assert "test:@ci/be-api" in names
+        assert "typecheck:@ci/be-api" in names
+
+    def test_uses_the_right_workspace_invocation(self, tmp_path):
+        repo = _workspace_repo(tmp_path, "yarn.lock", {},
+                               {"@ci/be-api": {"test": "vitest"}})
+        plan = plan_for("X", repo)
+        check = next(c for c in plan.checks if c.name.startswith("test:"))
+        assert check.argv == ["yarn", "workspace", "@ci/be-api", "test"]
+
+    def test_pnpm_uses_filter(self, tmp_path):
+        repo = _workspace_repo(tmp_path, "pnpm-lock.yaml", {},
+                               {"@ci/ui": {"test": "vitest"}})
+        plan = plan_for("X", repo)
+        check = next(c for c in plan.checks if c.name.startswith("test:"))
+        assert check.argv == ["pnpm", "--filter", "@ci/ui", "run", "test"]
+
+    def test_root_test_script_wins_over_packages(self, tmp_path):
+        """A root `test` that already fans out must not be duplicated."""
+        repo = _workspace_repo(tmp_path, "yarn.lock", {"test": "turbo test"},
+                               {"@ci/a": {"test": "vitest"}})
+        plan = plan_for("X", repo)
+        assert [c.name for c in plan.checks] == ["test"]
+
+    def test_placeholder_test_in_a_package_is_ignored(self, tmp_path):
+        repo = _workspace_repo(tmp_path, "yarn.lock", {},
+                               {"@ci/a": {"test": 'echo "Error: no test specified"'}})
+        plan = plan_for("X", repo)
+        assert not any(c.name.startswith("test:") for c in plan.checks)
+
+    def test_package_without_a_name_is_skipped(self, tmp_path):
+        repo = _workspace_repo(tmp_path, "yarn.lock", {}, {})
+        d = repo / "packages" / "anon"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text('{"scripts":{"test":"vitest"}}', encoding="utf-8")
+        assert plan_for("X", repo).checks == []
+
+    def test_build_is_not_fanned_out(self, tmp_path):
+        """Building every package is a release concern, not a check."""
+        repo = _workspace_repo(tmp_path, "yarn.lock", {},
+                               {"@ci/a": {"build": "tsc"}})
+        assert not any(c.name.startswith("build:") for c in plan_for("X", repo).checks)
+
+    def test_note_records_the_source(self, tmp_path):
+        repo = _workspace_repo(tmp_path, "yarn.lock", {},
+                               {"@ci/a": {"test": "vitest"}})
+        plan = plan_for("X", repo)
+        assert any("workspace package" in n for n in plan.notes)
+        # The misleading "no test script" note must be gone.
+        assert "no test script" not in plan.notes
+
+
+class TestMakefileTargets:
+    def test_reads_targets(self, tmp_path):
+        (tmp_path / "Makefile").write_text(
+            "help: ## desc\nbuild: ## Build images\n\tdocker build .\n"
+            "dev:\n\tyarn dev\n", encoding="utf-8")
+        assert makefile_targets(tmp_path) == ["help", "build", "dev"]
+
+    def test_ignores_variable_assignment(self, tmp_path):
+        (tmp_path / "Makefile").write_text("CC := gcc\nbuild:\n\ttrue\n",
+                                           encoding="utf-8")
+        assert makefile_targets(tmp_path) == ["build"]
+
+    def test_absent_makefile(self, tmp_path):
+        assert makefile_targets(tmp_path) == []
+
+    def test_surfaced_as_a_note(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"scripts":{"lint":"eslint"}}',
+                                               encoding="utf-8")
+        (tmp_path / "Makefile").write_text("build:\n\ttrue\ndev:\n\ttrue\n",
+                                           encoding="utf-8")
+        plan = plan_for("CI-Server", tmp_path)
+        assert any("make build" in n and "make dev" in n for n in plan.notes)
+
+
+class TestNestedCheckouts:
+    """Agent worktrees live inside the repo and poison tree-walking checks.
+
+    Measured on CI-Server: 18 nested checkouts produced 19,096 lint problems
+    against a tree that lints clean (eslint exit 0) once they are excluded.
+    """
+
+    def _nest(self, tmp_path, parent, names):
+        for name in names:
+            d = tmp_path / parent / name
+            d.mkdir(parents=True)
+            (d / ".git").write_text("gitdir: ../..", encoding="utf-8")
+
+    def test_finds_claude_worktrees(self, tmp_path):
+        self._nest(tmp_path, ".claude/worktrees", ["agent-a1", "agent-b2"])
+        found = nested_checkouts(tmp_path)
+        assert found == [".claude/worktrees/agent-a1",
+                         ".claude/worktrees/agent-b2"]
+
+    def test_finds_dot_worktrees(self, tmp_path):
+        self._nest(tmp_path, ".worktrees", ["video"])
+        assert nested_checkouts(tmp_path) == [".worktrees/video"]
+
+    def test_finds_both_roots(self, tmp_path):
+        """Excluding only `.worktrees` left 17,978 problems on CI-Server."""
+        self._nest(tmp_path, ".worktrees", ["video"])
+        self._nest(tmp_path, ".claude/worktrees", ["agent-a1"])
+        assert len(nested_checkouts(tmp_path)) == 2
+
+    def test_directory_without_git_is_not_a_checkout(self, tmp_path):
+        (tmp_path / ".claude" / "worktrees" / "notes").mkdir(parents=True)
+        assert nested_checkouts(tmp_path) == []
+
+    def test_clean_repo_reports_none(self, tmp_path):
+        assert nested_checkouts(tmp_path) == []
+
+    def test_limit_caps_the_scan(self, tmp_path):
+        self._nest(tmp_path, ".claude/worktrees", [f"a{i}" for i in range(10)])
+        assert len(nested_checkouts(tmp_path, limit=3)) == 3
+
+    def test_plan_warns_and_records(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"scripts":{"lint":"eslint"}}',
+                                               encoding="utf-8")
+        self._nest(tmp_path, ".claude/worktrees", ["agent-a1"])
+        plan = plan_for("CI-Server", tmp_path)
+        assert plan.contaminated == [".claude/worktrees/agent-a1"]
+        assert any(n.startswith("WARNING:") for n in plan.notes)
+
+    def test_warning_applies_to_every_stack(self, tmp_path):
+        """Rust, Go and Python repos walk trees too."""
+        (tmp_path / "Cargo.toml").write_text("[package]", encoding="utf-8")
+        self._nest(tmp_path, ".worktrees", ["wt"])
+        assert plan_for("X", tmp_path).contaminated
+
+    def test_clean_plan_has_no_warning(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"scripts":{"lint":"eslint"}}',
+                                               encoding="utf-8")
+        plan = plan_for("X", tmp_path)
+        assert plan.contaminated == []
+        assert not any(n.startswith("WARNING:") for n in plan.notes)
