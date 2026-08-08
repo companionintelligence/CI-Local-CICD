@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .detect import Check, RepoPlan
+from .detect import Check, RepoPlan, node_install_reason
 
 DEFAULT_TIMEOUT = 1800  # 30 min; the longest hosted job in the report was ~25
 TAIL_LINES = 40
@@ -136,7 +136,8 @@ def run_plan(
 
     queue: List[Check] = []
     needs_install = install or (
-        plan.stack == "node" and not (plan.path / "node_modules").exists()
+        plan.stack == "node"
+        and node_install_reason(plan.path, plan.manager or "npm") is not None
     )
     if plan.install and needs_install:
         queue.append(plan.install)

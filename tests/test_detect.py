@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
-from local_ci.detect import detect_node_manager, discover_repos, plan_for
+from local_ci.detect import (
+    LOCKFILE_MANAGERS,
+    NODE_INSTALL_MARKERS,
+    detect_node_manager,
+    discover_repos,
+    node_install_reason,
+    plan_for,
+)
 
 
 def make_node_repo(tmp_path, scripts, lockfile=None, package_manager=None):
@@ -18,6 +26,27 @@ def make_node_repo(tmp_path, scripts, lockfile=None, package_manager=None):
     (root / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
     if lockfile:
         (root / lockfile).write_text("", encoding="utf-8")
+    return root
+
+
+def install_tree(root, manager, installed_at, lock_at, marker=True):
+    """A `node_modules` installed at ``installed_at``, lockfiles at ``lock_at``.
+
+    Timestamps are set explicitly rather than slept into place: the whole point
+    of the check is the ordering between them, and a test that waits for the
+    clock is a test that flakes on a fast disk.
+    """
+    modules = root / "node_modules"
+    modules.mkdir(exist_ok=True)
+    if marker:
+        name = NODE_INSTALL_MARKERS.get(manager)
+        if name:
+            (modules / name).write_text("{}", encoding="utf-8")
+            os.utime(modules / name, (installed_at, installed_at))
+    os.utime(modules, (installed_at, installed_at))
+    for lockfile, mgr in LOCKFILE_MANAGERS:
+        if mgr == manager and (root / lockfile).exists():
+            os.utime(root / lockfile, (lock_at, lock_at))
     return root
 
 
@@ -100,6 +129,66 @@ class TestNodePlan:
         root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="yarn.lock")
         plan = plan_for("repo", root)
         assert any("node_modules missing" in n for n in plan.notes)
+
+    def test_stale_node_modules_is_flagged(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        install_tree(root, "npm", installed_at=1000, lock_at=2000)
+        plan = plan_for("repo", root)
+        assert any("package-lock.json is newer" in n for n in plan.notes)
+
+
+class TestNodeInstallReason:
+    """`node_modules` existing is not `node_modules` being current."""
+
+    def test_absent_tree(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        assert node_install_reason(root, "npm") == "node_modules missing"
+
+    def test_tree_newer_than_lockfile_is_current(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        install_tree(root, "npm", installed_at=2000, lock_at=1000)
+        assert node_install_reason(root, "npm") is None
+
+    def test_lockfile_newer_than_tree_is_stale(self, tmp_path):
+        # The real case: a dependency bump lands via git, the hoisted top-level
+        # copy stays whatever was installed before it, and the checks quietly
+        # run against a version the lockfile does not describe.
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        install_tree(root, "npm", installed_at=1000, lock_at=2000)
+        assert node_install_reason(root, "npm") == (
+            "package-lock.json is newer than the installed tree"
+        )
+
+    @pytest.mark.parametrize(
+        "manager,lockfile",
+        [("pnpm", "pnpm-lock.yaml"), ("yarn", "yarn.lock"), ("bun", "bun.lockb")],
+    )
+    def test_every_manager(self, tmp_path, manager, lockfile):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile=lockfile)
+        install_tree(root, manager, installed_at=1000, lock_at=2000)
+        assert node_install_reason(root, manager) == (
+            f"{lockfile} is newer than the installed tree"
+        )
+        install_tree(root, manager, installed_at=3000, lock_at=2000)
+        assert node_install_reason(root, manager) is None
+
+    def test_bun_falls_back_to_the_directory_mtime(self, tmp_path):
+        # bun leaves no marker file, so the directory's own mtime is all there is.
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="bun.lockb")
+        install_tree(root, "bun", installed_at=1000, lock_at=2000, marker=False)
+        assert not (root / "node_modules" / ".package-lock.json").exists()
+        assert node_install_reason(root, "bun") is not None
+
+    def test_missing_marker_falls_back_to_the_directory_mtime(self, tmp_path):
+        # npm 6 and hand-made trees have no hidden lockfile to read.
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        install_tree(root, "npm", installed_at=1000, lock_at=2000, marker=False)
+        assert node_install_reason(root, "npm") is not None
+
+    def test_no_lockfile_means_nothing_to_be_stale_against(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"})
+        install_tree(root, "npm", installed_at=1000, lock_at=2000)
+        assert node_install_reason(root, "npm") is None
 
 
 class TestOtherStacks:

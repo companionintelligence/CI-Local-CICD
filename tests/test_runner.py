@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from local_ci.detect import Check, RepoPlan
@@ -16,6 +17,19 @@ def py(code: str):
 
 def make_plan(tmp_path, checks, install=None, stack="python"):
     return RepoPlan("repo", tmp_path, stack=stack, checks=checks, install=install)
+
+
+def node_repo(root, installed_at, lock_at):
+    """An npm tree installed at ``installed_at`` against a lockfile at ``lock_at``."""
+    modules = root / "node_modules"
+    modules.mkdir(exist_ok=True)
+    (modules / ".package-lock.json").write_text("{}", encoding="utf-8")
+    os.utime(modules / ".package-lock.json", (installed_at, installed_at))
+    os.utime(modules, (installed_at, installed_at))
+    lock = root / "package-lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    os.utime(lock, (lock_at, lock_at))
+    return root
 
 
 class TestRunCheck:
@@ -131,6 +145,31 @@ class TestRunPlan:
             stack="node",
         )
         assert run_plan(plan).checks[0].name == "install"
+
+    def test_node_repo_installs_when_the_tree_is_stale(self, tmp_path):
+        # A tree left over from before a dependency bump serves the superseded
+        # package, so the checks run against versions the lockfile does not
+        # describe. Reconcile it first rather than reporting that fiction.
+        node_repo(tmp_path, installed_at=1000, lock_at=2000)
+        plan = make_plan(
+            tmp_path,
+            [Check("test", py("pass"))],
+            install=Check("install", py("pass")),
+            stack="node",
+        )
+        plan.manager = "npm"
+        assert [c.name for c in run_plan(plan).checks] == ["install", "test"]
+
+    def test_node_repo_skips_install_when_the_tree_is_current(self, tmp_path):
+        node_repo(tmp_path, installed_at=2000, lock_at=1000)
+        plan = make_plan(
+            tmp_path,
+            [Check("test", py("pass"))],
+            install=Check("install", py("pass")),
+            stack="node",
+        )
+        plan.manager = "npm"
+        assert [c.name for c in run_plan(plan).checks] == ["test"]
 
     def test_failed_install_skips_everything_after(self, tmp_path):
         plan = make_plan(

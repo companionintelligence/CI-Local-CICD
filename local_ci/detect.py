@@ -98,6 +98,60 @@ def _node_install(manager: str) -> List[str]:
     }[manager]
 
 
+# What each manager writes inside `node_modules` when it reconciles the tree
+# with the lockfile; its mtime is when that last happened. bun has no such file
+# worth relying on, so it falls back to the directory's own mtime.
+NODE_INSTALL_MARKERS = {
+    "npm": ".package-lock.json",
+    "pnpm": ".modules.yaml",
+    "yarn": ".yarn-state.yml",
+}
+
+
+def node_install_reason(path: Path, manager: str) -> Optional[str]:
+    """Why the node tree has to be installed before checks run, or ``None``.
+
+    `node_modules` existing is not the same as `node_modules` being current.
+    A tree installed before a dependency bump keeps serving the superseded
+    package - the top-level copy stays whatever got hoisted there at install
+    time, even once the lockfile says otherwise, because nothing rewrites it
+    until an install runs. Checks then run against versions no commit
+    describes, and nothing in the output says so: a test fails, and the diff
+    that "broke" it does not exist.
+
+    Staleness is read from mtimes, comparing the lockfile against the marker
+    the manager leaves in `node_modules`. That is a heuristic, so it is pointed
+    the safe way - every install command here is lockfile-frozen, which makes a
+    false positive cost one reinstall and a false negative cost an afternoon.
+    """
+    modules = path / "node_modules"
+    if not modules.exists():
+        return "node_modules missing"
+
+    locks = [path / name for name, mgr in LOCKFILE_MANAGERS if mgr == manager]
+    present = [f for f in locks if f.exists()]
+    if not present:
+        # No lockfile to be stale against - `install` would resolve fresh, so an
+        # existing tree is as good an answer as any.
+        return None
+
+    marker_name = NODE_INSTALL_MARKERS.get(manager)
+    marker = modules / marker_name if marker_name else None
+    try:
+        installed_at = (
+            marker.stat().st_mtime
+            if marker is not None and marker.exists()
+            else modules.stat().st_mtime
+        )
+        newest = max(present, key=lambda f: f.stat().st_mtime)
+        if newest.stat().st_mtime <= installed_at:
+            return None
+    except OSError:
+        # Can't read the timestamps, so can't claim the tree is stale.
+        return None
+    return f"{newest.name} is newer than the installed tree"
+
+
 def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
     """Build the local check plan for a single repo.
 
@@ -150,8 +204,9 @@ def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
                 break
             else:
                 plan.notes.append(f"no {slot} script")
-        if not (path / "node_modules").exists():
-            plan.notes.append("node_modules missing - install required")
+        reason = node_install_reason(path, manager)
+        if reason:
+            plan.notes.append(f"{reason} - install required")
         return plan
 
     if (path / "Cargo.toml").exists():
