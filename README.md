@@ -143,6 +143,14 @@ proves it exists. Package manager comes from the lockfile (which beats a stale
 `packageManager` field). Node, Rust, Flutter, Go and Python are recognised;
 anything else reports "not detected" rather than guessing.
 
+For node repos the install step runs when `node_modules` is missing **or** when
+the lockfile is newer than the installed tree. A tree left over from before a
+dependency bump keeps serving the superseded package — the top-level copy stays
+whatever was hoisted there at install time — so the checks run against versions
+the lockfile doesn't describe, and nothing in the output says so. Every install
+command is lockfile-frozen (`npm ci`, `--frozen-lockfile`, `--immutable`), so
+reinstalling on a false positive costs time and nothing else.
+
 ### Tests
 
 ```bash
