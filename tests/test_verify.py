@@ -43,6 +43,124 @@ class TestWorkflowStatus:
         assert w.status == "gated"
 
 
+class TestBillingSurvivesGating:
+    """The regression this module exists to prevent.
+
+    `status` returning "gated" used to be the end of the story: `billing` was
+    derived from `status`, so a gated workflow recorded `billing: []` and every
+    consumer read that as "this repo costs nothing". It actually meant "we
+    switched it off before anyone priced it", and a restore decision was made
+    on the difference.
+    """
+
+    def _gated(self, source):
+        from local_ci.workflows import gate
+
+        text, changed = gate(source)
+        assert changed, "fixture must actually be gated for this test to mean anything"
+        return text
+
+    def test_gated_workflow_still_reports_it_would_bill(self):
+        from local_ci.workflows import restored_triggers, runner_labels
+
+        text = self._gated(
+            "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        )
+        w = RemoteWorkflow(
+            name="ci.yml", gated=True, triggers=["workflow_dispatch"],
+            restored=restored_triggers(text), runners=runner_labels(text),
+        )
+        # Current state: switched off, and honestly reported as such.
+        assert w.status == "gated"
+        assert w.billable == []
+        # Billing classification survives anyway.
+        assert w.restored_billable == ["push", "pull_request"]
+        assert w.would_bill is True
+        assert w.verdict.multiplier == 1
+
+    def test_gated_macos_workflow_keeps_its_10x_rate(self):
+        from local_ci.workflows import restored_triggers, runner_labels
+
+        text = self._gated(
+            "name: Build\non:\n  schedule:\n    - cron: '0 3 * * *'\n"
+            "jobs:\n  build:\n    runs-on: macos-latest\n"
+        )
+        w = RemoteWorkflow(
+            name="build.yml", gated=True, triggers=["workflow_dispatch"],
+            restored=restored_triggers(text), runners=runner_labels(text),
+        )
+        assert w.status == "gated"
+        assert w.would_bill is True
+        assert w.verdict.multiplier == 10
+
+    def test_gated_manual_only_workflow_is_genuinely_free(self):
+        """The fix must not flip every gated workflow to 'billable'."""
+        w = RemoteWorkflow(
+            name="release.yml", gated=True, triggers=["workflow_dispatch"],
+            restored=["workflow_dispatch"], runners=["ubuntu-latest"],
+        )
+        assert w.would_bill is False
+
+    def test_gated_self_hosted_workflow_is_free(self):
+        w = RemoteWorkflow(
+            name="ci.yml", gated=True, triggers=["workflow_dispatch"],
+            restored=["push"], runners=["self-hosted"],
+        )
+        assert w.would_bill is False
+        assert w.verdict.reason == "self-hosted runners only"
+
+    def test_verdict_ignores_the_gated_flag_entirely(self):
+        """Same inputs, both gate states, identical verdict."""
+        kwargs = dict(name="ci.yml", triggers=["push"], restored=["push"],
+                      runners=["ubuntu-latest"])
+        on = RemoteWorkflow(gated=False, **kwargs)
+        off = RemoteWorkflow(gated=True, **kwargs)
+        assert on.would_bill == off.would_bill is True
+        assert on.verdict.multiplier == off.verdict.multiplier
+
+    def test_restored_defaults_to_live_triggers(self):
+        assert RemoteWorkflow(name="a.yml", gated=False,
+                              triggers=["push"]).restored == ["push"]
+
+    def test_end_to_end_through_audit_worktree(self, tmp_path):
+        """A gated repo on disk reports zero billing but a real restore cost."""
+        from local_ci.verify import audit_worktree
+        from local_ci.workflows import gate
+
+        d = tmp_path / ".github" / "workflows"
+        d.mkdir(parents=True)
+        gated, _ = gate(
+            "name: CI\non:\n  push:\n  pull_request:\n"
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n"
+        )
+        (d / "ci.yml").write_text(gated, encoding="utf-8")
+
+        audit = audit_worktree(tmp_path, "CI-Hub", Policy(), "dev")
+        assert audit.billing == []                       # nothing costs money now
+        assert [w.name for w in audit.billable_if_restored] == ["ci.yml"]
+
+    def test_snapshot_records_billing_and_restore_cost_separately(self, tmp_path):
+        from local_ci.verify import audit_worktree
+        from local_ci.workflows import gate
+
+        d = tmp_path / ".github" / "workflows"
+        d.mkdir(parents=True)
+        gated, _ = gate("name: CI\non:\n  push:\njobs:\n  t:\n    "
+                        "runs-on: ubuntu-latest\n")
+        (d / "ci.yml").write_text(gated, encoding="utf-8")
+
+        snap = snapshot([audit_worktree(tmp_path, "R", Policy(), "main")])
+        assert snap["R"]["billing"] == []
+        assert snap["R"]["billable_if_restored"] == ["ci.yml"]
+
+    def test_drift_still_keys_off_live_billing(self):
+        """The new field must not make every gated repo look like drift."""
+        base = {"A": {"base": "main", "billing": [],
+                      "billable_if_restored": ["ci.yml"], "known": ["ci.yml"]}}
+        assert find_drift(base, base) == []
+
+
 class TestRepoAudit:
     def test_counts_group_by_status(self):
         audit = RepoAudit("CI-Hub", "dev", workflows=[

@@ -413,6 +413,24 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if usage:
         print(f"outstanding attributed spend on ungated workflows: "
               f"${outstanding:,.2f}/month")
+
+    # "Fully gated" is not "free". Gating is a switch, and restoring a repo
+    # turns its bill back on - so report what is merely switched off, weighted
+    # by runner OS, separately from what is switched off *and* costs nothing.
+    dormant = [
+        (a, [w for w in a.billable_if_restored if w.status != "BILLING"])
+        for a in sorted(audits, key=lambda a: a.repo) if not a.error
+    ]
+    dormant = [(a, wfs) for a, wfs in dormant if wfs]
+    if dormant:
+        print(f"\n{len(dormant)} repo(s) are not billing only because they are "
+              f"gated. Restoring them resumes spend:")
+        for audit, wfs in dormant:
+            weighted = sum(w.verdict.multiplier for w in wfs)
+            print(f"   {audit.repo:<38} {len(wfs)} workflow(s), "
+                  f"{weighted}x linux-equivalent")
+            for wf in wfs:
+                print(f"      {wf.name:<40} {wf.verdict.reason}")
     return 0
 
 
