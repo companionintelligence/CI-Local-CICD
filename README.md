@@ -82,6 +82,25 @@ is what GitHub evaluates triggers from:
 Drift is one-directional: gating *more* than the baseline is never reported.
 Only regressions and newly-added ungated workflows fire.
 
+### `billing` is not `cost`
+
+The baseline records two different questions, and confusing them produces a
+wrong budget:
+
+- **`billing`** — what is burning minutes *right now*. A gated workflow is
+  absent from this list, correctly, because gating stopped the spend.
+- **`billable_if_restored`** — what it costs *whenever it is not gated*.
+  Computed from the original triggers that gating parked in a comment block,
+  and from `runs-on`, so it survives the switch being off.
+
+`billing: []` therefore means "nothing is billing today", **not** "this repo is
+free". Restoring a repo whose `billing` is empty can still turn real spend back
+on; `billable_if_restored` is the number to price that decision against.
+
+Cost is weighted by runner OS, not by workflow count — Linux 1x, Windows 2x,
+macOS 10x — and minutes are free on self-hosted runners and on public repos
+using standard runners.
+
 The watch is a launchd agent (macOS) or systemd user timer (Linux), not a
 scheduled GitHub Action — a job that polices Actions spend should not itself
 burn billed minutes, and a workflow living in one repo cannot see the other

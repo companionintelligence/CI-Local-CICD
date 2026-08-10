@@ -11,7 +11,10 @@ from local_ci.workflows import (
     find_on_block,
     gate,
     is_gated,
+    original_on_block,
     restore,
+    restored_triggers,
+    runner_labels,
 )
 
 MAPPING = """\
@@ -255,6 +258,120 @@ class TestRestore:
         gated, _ = gate(text)
         back, _ = restore(gated)
         assert back == text
+
+
+class TestOriginalTriggersSurviveGating:
+    """Gating hides the real triggers in a comment; they must stay readable."""
+
+    def test_ungated_file_has_no_original_block(self):
+        assert original_on_block(MAPPING) is None
+
+    def test_gated_file_exposes_its_pre_gating_triggers(self):
+        gated, _ = gate(MAPPING)
+        assert declared_triggers(gated) == ["workflow_dispatch"]
+        assert restored_triggers(gated) == ["push", "pull_request"]
+
+    def test_restored_triggers_match_an_actual_restore(self):
+        """The cheap read and the real rewrite must agree."""
+        gated, _ = gate(MAPPING)
+        back, _ = restore(gated)
+        assert restored_triggers(gated) == declared_triggers(back)
+
+    def test_inline_trigger_list_survives(self):
+        gated, changed = gate("name: X\non: [push, pull_request]\njobs:\n  a: 1\n")
+        assert changed
+        assert restored_triggers(gated) == ["push", "pull_request"]
+
+    def test_ungated_file_reports_its_live_triggers(self):
+        assert restored_triggers(MAPPING) == ["push", "pull_request"]
+
+    def test_marker_text_without_a_real_pair_is_not_restorable(self):
+        """`is_gated` matches the marker anywhere; restore must not crash."""
+        text = "name: X\n# see `# >>> ci-local:gated` / `# <<< ci-local:gated`\n"
+        assert is_gated(text)
+        assert restore(text) == (text, False)
+        assert original_on_block(text) is None
+
+
+class TestRunnerLabels:
+    def test_scalar(self):
+        assert runner_labels("jobs:\n  a:\n    runs-on: ubuntu-latest\n") == [
+            "ubuntu-latest"]
+
+    def test_inline_sequence(self):
+        assert runner_labels(
+            "jobs:\n  a:\n    runs-on: [self-hosted, linux, x64]\n"
+        ) == ["self-hosted", "linux", "x64"]
+
+    def test_block_sequence(self):
+        assert runner_labels(
+            "jobs:\n  a:\n    runs-on:\n      - self-hosted\n      - linux\n"
+        ) == ["self-hosted", "linux"]
+
+    def test_matrix_expression_is_kept_verbatim(self):
+        assert runner_labels(
+            "jobs:\n  a:\n    runs-on: ${{ matrix.os }}\n"
+        ) == ["${{ matrix.os }}"]
+
+    def test_multiple_jobs_deduplicated(self):
+        text = ("jobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                "  b:\n    runs-on: macos-latest\n"
+                "  c:\n    runs-on: ubuntu-latest\n")
+        assert runner_labels(text) == ["ubuntu-latest", "macos-latest"]
+
+    def test_commented_runs_on_is_ignored(self):
+        assert runner_labels(
+            "jobs:\n  a:\n    # runs-on: macos-latest\n    runs-on: ubuntu-latest\n"
+        ) == ["ubuntu-latest"]
+
+    def test_readable_through_gating(self):
+        """Runners are outside the `on:` block, so gating must not touch them."""
+        gated, _ = gate("name: X\non:\n  push:\njobs:\n  a:\n    "
+                        "runs-on: macos-latest\n")
+        assert runner_labels(gated) == ["macos-latest"]
+
+    def test_no_runs_on(self):
+        assert runner_labels("name: X\non:\n  push:\n") == []
+
+    def test_trailing_comment_is_stripped(self):
+        """Companion-Pipe/e2e-macos.yml carries an inline comment."""
+        assert runner_labels(
+            "jobs:\n  a:\n    runs-on: macos-14  # M1, Sonoma\n"
+        ) == ["macos-14"]
+
+
+class TestRunnerTargets:
+    """Grouping decides self-hosted vs hosted, so it must not be flattened."""
+
+    def test_inline_sequence_is_one_group(self):
+        from local_ci.workflows import runner_targets
+
+        assert runner_targets(
+            "jobs:\n  a:\n    runs-on: [self-hosted, macos-test]\n"
+        ) == [["self-hosted", "macos-test"]]
+
+    def test_separate_jobs_are_separate_groups(self):
+        from local_ci.workflows import runner_targets
+
+        assert runner_targets(
+            "jobs:\n  a:\n    runs-on: ubuntu-latest\n"
+            "  b:\n    runs-on: macos-latest\n"
+        ) == [["ubuntu-latest"], ["macos-latest"]]
+
+    def test_block_sequence_is_one_group(self):
+        from local_ci.workflows import runner_targets
+
+        assert runner_targets(
+            "jobs:\n  a:\n    runs-on:\n      - self-hosted\n      - linux\n"
+        ) == [["self-hosted", "linux"]]
+
+    def test_repeated_runner_keeps_one_group_per_job(self):
+        from local_ci.workflows import runner_targets
+
+        assert runner_targets(
+            "jobs:\n  a:\n    runs-on: ubuntu-latest\n"
+            "  b:\n    runs-on: ubuntu-latest\n"
+        ) == [["ubuntu-latest"], ["ubuntu-latest"]]
 
 
 CRLF = "name: X\r\non:\r\n  push:\r\n    branches: [main]\r\njobs:\r\n  a: 1\r\n"

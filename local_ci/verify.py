@@ -19,8 +19,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .billing import BillingVerdict, classify_billing
 from .policy import MANUAL_TRIGGERS, Policy
-from .workflows import PRESERVED_TRIGGERS, WorkflowParseError, declared_triggers, is_gated
+from .workflows import (
+    PRESERVED_TRIGGERS,
+    WorkflowParseError,
+    declared_triggers,
+    is_gated,
+    restored_triggers,
+    runner_labels,
+    runner_targets,
+)
 
 
 @dataclass
@@ -47,17 +56,64 @@ class RemoteWorkflow:
     kept: Optional[str] = None
     title: str = ""
     inputs: List["DispatchInput"] = field(default_factory=list)
+    # Triggers the workflow would fire on if gating were lifted. For an ungated
+    # workflow this equals `triggers`; for a gated one it is recovered from the
+    # marker comments, which is the only place the real answer survives.
+    restored: List[str] = field(default_factory=list)
+    # Flattened labels, for display.
+    runners: List[str] = field(default_factory=list)
+    # One label group per `runs-on:`; grouping is what distinguishes a
+    # self-hosted job from a hosted one. Defaults to one group per label.
+    targets: List[List[str]] = field(default_factory=list)
+    # Private unless proven otherwise: over-reporting the bill is the safe error.
+    private: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.restored:
+            self.restored = list(self.triggers)
+        if not self.targets:
+            self.targets = [[label] for label in self.runners]
 
     @property
     def billable(self) -> List[str]:
-        """Triggers that still cause GitHub-hosted runs."""
+        """Automatic triggers that are live *right now*.
+
+        Empty for a gated workflow, correctly: gating stopped the spend. Use
+        :attr:`restored_billable` to ask what it would cost if turned back on.
+        """
         return [
             t for t in self.triggers
             if t not in MANUAL_TRIGGERS and t not in PRESERVED_TRIGGERS
         ]
 
     @property
+    def restored_billable(self) -> List[str]:
+        """Automatic triggers this workflow has when not gated."""
+        return [
+            t for t in self.restored
+            if t not in MANUAL_TRIGGERS and t not in PRESERVED_TRIGGERS
+        ]
+
+    @property
+    def verdict(self) -> BillingVerdict:
+        """Would this cost money if it were running? Independent of gating.
+
+        Deliberately computed from :attr:`restored`, not :attr:`triggers`, and
+        deliberately never consults :attr:`gated`. A gated workflow keeps a
+        truthful cost answer so restoring it is a priced decision.
+        """
+        return classify_billing(self.restored, self.targets, self.private)
+
+    @property
+    def would_bill(self) -> bool:
+        return self.verdict.billable
+
+    @property
     def status(self) -> str:
+        """Current spend state. ``gated`` wins because it is a fact about now.
+
+        This is *not* the billing classification - see :attr:`would_bill`.
+        """
         if self.gated:
             return "gated"
         if not self.billable:
@@ -73,10 +129,22 @@ class RepoAudit:
     base: str = ""
     error: str = ""
     workflows: List[RemoteWorkflow] = field(default_factory=list)
+    private: bool = True
 
     @property
     def billing(self) -> List[RemoteWorkflow]:
+        """Workflows billing right now."""
         return [w for w in self.workflows if w.status == "BILLING"]
+
+    @property
+    def billable_if_restored(self) -> List[RemoteWorkflow]:
+        """Workflows that cost money whenever they are not gated.
+
+        Superset of :attr:`billing`. This is the honest answer to "what would
+        restoring this repo cost", which :attr:`billing` cannot give because a
+        gated workflow reports no live triggers.
+        """
+        return [w for w in self.workflows if w.would_bill]
 
     @property
     def counts(self) -> Dict[str, int]:
@@ -174,12 +242,23 @@ def audit_repo(repo_slug: str, policy: Policy, local_name: str = "") -> RepoAudi
     local_name = local_name or repo_slug.split("/")[-1]
     audit = RepoAudit(local_name)
 
-    code, out = _gh(["repo", "view", repo_slug, "--json", "defaultBranchRef",
-                     "-q", ".defaultBranchRef.name"])
+    # Visibility comes back on the same call: a public repo's standard-runner
+    # minutes are free, so the bill cannot be judged without it.
+    code, out = _gh(["repo", "view", repo_slug, "--json",
+                     "defaultBranchRef,isPrivate"])
     if code or not out.strip():
         audit.error = "cannot resolve default branch"
         return audit
-    audit.base = out.strip()
+    try:
+        meta = json.loads(out)
+        audit.base = (meta.get("defaultBranchRef") or {}).get("name", "")
+    except json.JSONDecodeError:
+        audit.error = "cannot resolve default branch"
+        return audit
+    if not audit.base:
+        audit.error = "cannot resolve default branch"
+        return audit
+    audit.private = bool(meta.get("isPrivate", True))
 
     code, out = _gh(["api", f"repos/{repo_slug}/contents/.github/workflows"
                              f"?ref={audit.base}"])
@@ -221,6 +300,10 @@ def audit_repo(repo_slug: str, policy: Policy, local_name: str = "") -> RepoAudi
             kept=policy.matches_keep(f"{local_name}/{name}"),
             title=workflow_title(text) or name,
             inputs=dispatch_inputs(text),
+            restored=restored_triggers(text),
+            runners=runner_labels(text),
+            targets=runner_targets(text),
+            private=audit.private,
         )
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -230,7 +313,7 @@ def audit_repo(repo_slug: str, policy: Policy, local_name: str = "") -> RepoAudi
 
 
 def audit_worktree(
-    worktree, local_name: str, policy: Policy, base: str
+    worktree, local_name: str, policy: Policy, base: str, private: bool = True
 ) -> RepoAudit:
     """Same classification as :func:`audit_repo`, read off disk.
 
@@ -239,7 +322,7 @@ def audit_worktree(
     """
     from .workflows import read_workflow
 
-    audit = RepoAudit(local_name, base)
+    audit = RepoAudit(local_name, base, private=private)
     wf_dir = worktree / ".github" / "workflows"
     if not wf_dir.is_dir():
         return audit
@@ -261,6 +344,10 @@ def audit_worktree(
             kept=policy.matches_keep(f"{local_name}/{path.name}"),
             title=workflow_title(text) or path.name,
             inputs=dispatch_inputs(text),
+            restored=restored_triggers(text),
+            runners=runner_labels(text),
+            targets=runner_targets(text),
+            private=audit.private,
         ))
     return audit
 
@@ -286,7 +373,14 @@ BASELINE_FILE = ".ci-local-baseline.json"
 
 
 def snapshot(audits: List[RepoAudit]) -> Dict[str, Dict]:
-    """Reduce an audit to the facts drift cares about."""
+    """Reduce an audit to the facts drift cares about.
+
+    ``billing`` is what is costing money *now* and is what :func:`find_drift`
+    compares. ``billable_if_restored`` is the separate, gating-independent
+    question "what would this cost if switched back on" - recorded because
+    reading an empty ``billing`` as "this repo is free" is exactly the mistake
+    that made a gated baseline look like a zero-cost one.
+    """
     out: Dict[str, Dict] = {}
     for audit in audits:
         if audit.error:
@@ -294,6 +388,9 @@ def snapshot(audits: List[RepoAudit]) -> Dict[str, Dict]:
         out[audit.repo] = {
             "base": audit.base,
             "billing": sorted(w.name for w in audit.billing),
+            "billable_if_restored": sorted(
+                w.name for w in audit.billable_if_restored
+            ),
             "known": sorted(w.name for w in audit.workflows),
         }
     return out
