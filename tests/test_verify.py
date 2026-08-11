@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from local_ci.policy import Policy
@@ -276,3 +278,163 @@ class TestAuditWorktree:
         from local_ci.verify import audit_worktree
 
         assert audit_worktree(tmp_path, "X", Policy(), "main").workflows == []
+
+
+# `on:` and `runs-on:` copied verbatim from the real file on
+# companionintelligence/CI-Portal@dev. The steps are elided; nothing below the
+# runner label affects the classification.
+CI_PORTAL_DEPLOY = """\
+name: Deploy CI-Cloud
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+      - dev
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+
+class TestKeptWorkflowsAreNotDormant:
+    """Regression for the defect merged in #9.
+
+    ``cmd_verify`` built its "dormant, only gated" list as
+    ``[w for w in a.billable_if_restored if w.status != "BILLING"]``.
+    ``status`` returns ``"kept"`` for a policy-protected workflow, so
+    CI-Portal's ``deploy.yml`` - ungated, on ``push`` to main, hosted Linux,
+    private repo - was printed as dormant while it was deploying to production
+    (run at 2026-08-10T23:27:40Z, conclusion success).
+    """
+
+    def _audit(self, tmp_path, keep=("CI-Portal/deploy.yml",)):
+        from local_ci.verify import audit_worktree
+
+        d = tmp_path / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / "deploy.yml").write_text(CI_PORTAL_DEPLOY, encoding="utf-8")
+        return audit_worktree(tmp_path, "CI-Portal", Policy(keep=list(keep)),
+                              "dev", private=True)
+
+    def test_the_facts_the_classification_rests_on(self, tmp_path):
+        w = self._audit(tmp_path).workflows[0]
+        assert w.gated is False
+        assert w.billable == ["push"]
+        assert w.kept == "CI-Portal/deploy.yml"
+        assert w.targets == [["ubuntu-latest"]]
+        assert w.would_bill is True
+
+    def test_it_is_live_billing_not_dormant(self, tmp_path):
+        audit = self._audit(tmp_path)
+        assert [w.name for w in audit.live_billing] == ["deploy.yml"]
+        assert audit.restore_cost == [], "it is running; it cannot be dormant"
+
+    def test_the_old_expression_is_the_one_that_was_wrong(self, tmp_path):
+        """Pin the exact defect so it cannot come back by copy-paste."""
+        audit = self._audit(tmp_path)
+        old = [w for w in audit.billable_if_restored if w.status != "BILLING"]
+        assert [w.name for w in old] == ["deploy.yml"]      # what #9 printed
+        assert audit.restore_cost == []                     # what is true
+
+    def test_restore_cost_only_ever_contains_gated_workflows(self, tmp_path):
+        from local_ci.verify import audit_worktree
+        from local_ci.workflows import gate
+
+        d = tmp_path / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / "deploy.yml").write_text(CI_PORTAL_DEPLOY, encoding="utf-8")
+        gated, changed = gate(CI_PORTAL_DEPLOY)
+        assert changed
+        (d / "ci.yml").write_text(gated, encoding="utf-8")
+
+        audit = audit_worktree(tmp_path, "CI-Portal",
+                               Policy(keep=["CI-Portal/deploy.yml"]), "dev",
+                               private=True)
+        assert [w.name for w in audit.live_billing] == ["deploy.yml"]
+        assert [w.name for w in audit.restore_cost] == ["ci.yml"]
+        assert all(w.gated for w in audit.restore_cost)
+
+    def test_billing_stays_the_policy_violation_set(self, tmp_path):
+        """`billing` still excludes kept workflows - drift baselines depend on it."""
+        assert self._audit(tmp_path).billing == []
+
+    def test_without_the_keep_pattern_it_is_a_policy_violation_too(self, tmp_path):
+        audit = self._audit(tmp_path, keep=())
+        assert [w.name for w in audit.billing] == ["deploy.yml"]
+        assert [w.name for w in audit.live_billing] == ["deploy.yml"]
+
+    def test_snapshot_records_all_three_sets(self, tmp_path):
+        snap = snapshot([self._audit(tmp_path)])["CI-Portal"]
+        assert snap["billing"] == []
+        assert snap["live_billing"] == ["deploy.yml"]
+        assert snap["restore_cost"] == []
+        assert snap["billable_if_restored"] == ["deploy.yml"]
+
+    def test_weighted_by_runner_os(self, tmp_path):
+        assert self._audit(tmp_path).linux_equivalent == 1
+
+
+class TestActivityOnRemoteWorkflow:
+    def test_activity_defaults_to_unmeasured(self):
+        from local_ci.activity import UNKNOWN
+
+        w = wf("deploy.yml", triggers=["push"], kept="*/deploy.yml")
+        assert w.activity is None
+        assert w.spend.activity == UNKNOWN
+        assert w.is_billing_now is True, "unmeasured must not read as free"
+
+    def test_recent_runs_are_reported_without_changing_the_state(self):
+        from local_ci.activity import ACTIVE, from_runs
+        from local_ci.spend import LIVE_BILLING
+
+        w = wf("deploy.yml", triggers=["push"], kept="*/deploy.yml")
+        w.runners = ["ubuntu-latest"]
+        w.targets = [["ubuntu-latest"]]
+        w.activity = from_runs([{"created_at": "2026-08-10T23:27:40Z",
+                                 "conclusion": "success"}],
+                               now=datetime(2026, 8, 10, 23, 59,
+                                            tzinfo=timezone.utc))
+        assert w.spend.activity == ACTIVE
+        assert w.spend.state == LIVE_BILLING
+
+    def test_measure_activity_only_touches_billable_states(self):
+        from local_ci.verify import measure_activity
+
+        billing = wf("deploy.yml", triggers=["push"], kept="*/deploy.yml")
+        manual = wf("release.yml", triggers=["workflow_dispatch"])
+        audit = RepoAudit("CI-Portal", "dev",
+                          workflows=[billing, manual], private=True)
+
+        asked = []
+
+        def fake(slug, name, window_days=30):
+            from local_ci.activity import RunActivity
+            asked.append(name)
+            return RunActivity(known=True)
+
+        measure_activity([audit], {"CI-Portal": "CI-Portal"}, fetch=fake)
+        assert asked == ["deploy.yml"]
+        assert manual.activity is None
+
+    def test_measure_activity_skips_errored_repos(self):
+        from local_ci.verify import measure_activity
+
+        audit = RepoAudit("Bad", error="cannot resolve default branch")
+        measure_activity([audit], {"Bad": "Bad"},
+                         fetch=lambda *a, **k: pytest.fail("must not fetch"))

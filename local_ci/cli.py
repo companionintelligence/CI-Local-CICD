@@ -32,7 +32,13 @@ from .ship import BRANCH, ship_repo, slug
 from .docs import render as render_docs
 from .schedule import install as install_watch
 from .schedule import notify, uninstall as uninstall_watch
-from .verify import BASELINE_FILE, audit_all, find_drift, snapshot
+from .activity import DEFAULT_WINDOW_DAYS as ACTIVITY_WINDOW_DAYS
+from .activity import DORMANT as ACTIVITY_DORMANT
+from .activity import UNKNOWN as ACTIVITY_UNKNOWN
+from .spend import linux_equivalent
+from .verify import (
+    BASELINE_FILE, audit_all, find_drift, measure_activity, snapshot,
+)
 from .workflows import (
     WorkflowParseError, gate, read_workflow, restore, write_workflow,
 )
@@ -382,6 +388,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
                    "; ".join(d.describe() for d in drifts[:3]))
         return 1
 
+    want_activity = getattr(args, "activity", False)
+    if want_activity:
+        # `dict(pairs)`, not `policy.github_name`: the API needs `owner/repo`,
+        # and a bare name silently 404s into "unknown" for every workflow.
+        measure_activity(audits, dict(pairs))
+
     still_billing = clean = 0
     outstanding = 0.0
     rows = []
@@ -391,12 +403,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
             continue
         counts = audit.counts
         summary = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
-        if audit.billing:
+        if audit.live_billing:
             still_billing += 1
         else:
             clean += 1
-        rows.append((f"{audit.repo} [{audit.base}]", summary, audit.billing))
+        rows.append((f"{audit.repo} [{audit.base}]", summary, audit.live_billing))
 
+    # The table lists every workflow that is billing today - kept ones marked
+    # `keep`, not omitted. Leaving them out is what let a live production
+    # deploy sit in the report as free.
     for name, summary, billing in rows:
         marker = "!" if billing else " "
         print(f" {marker} {name:<40} {summary}")
@@ -406,27 +421,51 @@ def cmd_verify(args: argparse.Namespace) -> int:
             )
             outstanding += spend
             money = f"${spend:>7,.2f}  " if usage else ""
-            print(f"      {money}{wf.name:<40} {','.join(wf.billable)}")
+            tag = " (keep)" if wf.kept else ""
+            print(f"      {money}{wf.name:<40} "
+                  f"{','.join(wf.billable)}{tag}")
 
-    print(f"\n{clean} repo(s) fully gated; {still_billing} still have "
-          f"automatic triggers on their default branch.")
+    print(f"\n{clean} repo(s) billing nothing; {still_billing} have live "
+          f"billable triggers on their default branch.")
+    live = [w for a in audits if not a.error for w in a.live_billing]
+    print(f"live billing: {len(live)} workflow(s), "
+          f"{linux_equivalent(w.spend for w in live)}x linux-equivalent"
+          f"  ({sum(1 for w in live if w.kept)} of them on the keep list)")
     if usage:
-        print(f"outstanding attributed spend on ungated workflows: "
+        print(f"attributed spend on live billable workflows: "
               f"${outstanding:,.2f}/month")
 
-    # "Fully gated" is not "free". Gating is a switch, and restoring a repo
-    # turns its bill back on - so report what is merely switched off, weighted
-    # by runner OS, separately from what is switched off *and* costs nothing.
-    dormant = [
-        (a, [w for w in a.billable_if_restored if w.status != "BILLING"])
-        for a in sorted(audits, key=lambda a: a.repo) if not a.error
-    ]
+    if want_activity:
+        # Third axis, reported separately so it never renames a state. An idle
+        # live-billing workflow still bills the next time anyone pushes.
+        # `state == DORMANT`, never `not ran_recently`: an unreadable run
+        # history is UNKNOWN, and printing it as idle is the same mistake one
+        # axis down.
+        idle = [w for w in live
+                if w.activity and w.activity.state == ACTIVITY_DORMANT]
+        unknown = [w for w in live
+                   if w.activity and w.activity.state == ACTIVITY_UNKNOWN]
+        if idle:
+            print(f"\n{len(idle)} live billable workflow(s) have not run in "
+                  f"{ACTIVITY_WINDOW_DAYS}d - candidates to retire, not "
+                  f"evidence they are free:")
+            for wf in idle:
+                print(f"      {wf.name:<40} {wf.activity.describe()}")
+        if unknown:
+            print(f"\n{len(unknown)} live billable workflow(s) have no readable "
+                  f"run history; they are counted as billing regardless.")
+
+    # Gating is a switch, and restoring a repo turns its bill back on - so
+    # report what is *switched off*, weighted by runner OS. This list is
+    # gated-only by construction: a live workflow can never appear here.
+    dormant = [(a, a.restore_cost)
+               for a in sorted(audits, key=lambda a: a.repo) if not a.error]
     dormant = [(a, wfs) for a, wfs in dormant if wfs]
     if dormant:
         print(f"\n{len(dormant)} repo(s) are not billing only because they are "
               f"gated. Restoring them resumes spend:")
         for audit, wfs in dormant:
-            weighted = sum(w.verdict.multiplier for w in wfs)
+            weighted = linux_equivalent(w.spend for w in wfs)
             print(f"   {audit.repo:<38} {len(wfs)} workflow(s), "
                   f"{weighted}x linux-equivalent")
             for wf in wfs:
@@ -606,6 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="record current state as the expected state")
     verify_p.add_argument("--check-drift", action="store_true",
                           help="exit 1 if any repo is worse than the baseline")
+    verify_p.add_argument(
+        "--activity", action="store_true",
+        help=f"also read run history ({ACTIVITY_WINDOW_DAYS}d) for billable "
+             f"workflows; one extra API call each",
+    )
     verify_p.add_argument("--notify", action="store_true",
                           help="send a desktop notification on drift")
     verify_p.set_defaults(func=cmd_verify)

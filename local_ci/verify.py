@@ -19,8 +19,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .activity import DEFAULT_WINDOW_DAYS as ACTIVITY_WINDOW_DAYS
+from .activity import RunActivity, fetch_activity
 from .billing import BillingVerdict, classify_billing
 from .policy import MANUAL_TRIGGERS, Policy
+from .spend import (
+    GATED_BILLABLE,
+    LIVE_BILLING,
+    SpendState,
+    classify_spend,
+    linux_equivalent,
+)
 from .workflows import (
     PRESERVED_TRIGGERS,
     WorkflowParseError,
@@ -67,6 +76,9 @@ class RemoteWorkflow:
     targets: List[List[str]] = field(default_factory=list)
     # Private unless proven otherwise: over-reporting the bill is the safe error.
     private: bool = True
+    # Run history, when someone asked for it. ``None`` means "not measured",
+    # which is not the same as "never runs" and must not be reported as such.
+    activity: Optional[RunActivity] = None
 
     def __post_init__(self) -> None:
         if not self.restored:
@@ -109,10 +121,38 @@ class RemoteWorkflow:
         return self.verdict.billable
 
     @property
-    def status(self) -> str:
-        """Current spend state. ``gated`` wins because it is a fact about now.
+    def spend(self) -> SpendState:
+        """Where this workflow sits on all three axes - the honest answer.
 
-        This is *not* the billing classification - see :attr:`would_bill`.
+        Use this, not :attr:`status`, for any question about money.
+        """
+        return classify_spend(
+            triggers_live=bool(self.billable),
+            verdict=self.verdict,
+            gated=self.gated,
+            activity=self.activity,
+            kept=self.kept,
+        )
+
+    @property
+    def is_billing_now(self) -> bool:
+        """Automatic triggers are live and they cost money. Kept or not."""
+        return self.spend.is_billing_now
+
+    @property
+    def is_restore_cost(self) -> bool:
+        """Gated, and would resume spend if restored. Excludes live workflows."""
+        return self.spend.is_restore_cost
+
+    @property
+    def status(self) -> str:
+        """Display bucket for the audit table. **Not** a spend classification.
+
+        ``"kept"`` is a *policy* label - "we chose not to gate this" - and says
+        nothing about whether it costs money. Reading a non-``"BILLING"``
+        status as "not billing" is what put CI-Portal's live production
+        ``deploy.yml`` in the dormant column. :attr:`spend` is the axis-correct
+        answer; this stays for the table, the runbook and the drift baseline.
         """
         if self.gated:
             return "gated"
@@ -133,8 +173,40 @@ class RepoAudit:
 
     @property
     def billing(self) -> List[RemoteWorkflow]:
-        """Workflows billing right now."""
-        return [w for w in self.workflows if w.status == "BILLING"]
+        """Ungated, automatic, billable and *not* on the keep list.
+
+        Despite the name this is the **policy-violation** set - "what is still
+        billing that we said we would gate" - not the bill. It deliberately
+        excludes kept workflows, which do bill. It keeps its exact membership
+        because :func:`find_drift` compares it against a recorded baseline.
+        For money, use :attr:`live_billing`.
+        """
+        return [w for w in self.workflows
+                if w.is_billing_now and not w.kept]
+
+    @property
+    def live_billing(self) -> List[RemoteWorkflow]:
+        """Everything putting minutes on the invoice today, kept included.
+
+        The number the cost decision needs.
+        """
+        return [w for w in self.workflows if w.is_billing_now]
+
+    @property
+    def restore_cost(self) -> List[RemoteWorkflow]:
+        """Gated workflows that would resume spend if restored.
+
+        Strictly disjoint from :attr:`live_billing`: a workflow cannot be both
+        switched off and running. That disjointness is the fix - the merged
+        report built this list as "billable and not status BILLING", which is
+        neither.
+        """
+        return [w for w in self.workflows if w.is_restore_cost]
+
+    @property
+    def linux_equivalent(self) -> int:
+        """Live billing weighted by runner OS. One macOS run costs ten Linux."""
+        return linux_equivalent(w.spend for w in self.live_billing)
 
     @property
     def billable_if_restored(self) -> List[RemoteWorkflow]:
@@ -362,6 +434,42 @@ def audit_all(
         ))
 
 
+def measure_activity(
+    audits: List[RepoAudit],
+    slugs: Dict[str, str],
+    window_days: int = ACTIVITY_WINDOW_DAYS,
+    states: Tuple[str, ...] = (LIVE_BILLING, GATED_BILLABLE),
+    fetch=fetch_activity,
+    workers: int = 8,
+) -> List[RepoAudit]:
+    """Fill in :attr:`RemoteWorkflow.activity` for the workflows worth pricing.
+
+    One API call per workflow, so it is opt-in and scoped: by default only the
+    states where the answer changes a decision - what is billing now, and what
+    would bill if restored. Everything left alone keeps ``activity=None``,
+    which reports as "not checked" rather than pretending to be dormant.
+    """
+    jobs: List[Tuple[RemoteWorkflow, str, str]] = []
+    for audit in audits:
+        if audit.error:
+            continue
+        slug_name = slugs.get(audit.repo)
+        if not slug_name:
+            continue
+        for wf in audit.workflows:
+            if wf.spend.state in states:
+                jobs.append((wf, slug_name, audit.base))
+
+    def run(job):
+        wf, slug_name, _base = job
+        wf.activity = fetch(slug_name, wf.name, window_days=window_days)
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(run, jobs))
+    return audits
+
+
 # --- drift detection -------------------------------------------------------
 #
 # A gating pass is a snapshot, not a policy. Workflows added later are born
@@ -375,11 +483,17 @@ BASELINE_FILE = ".ci-local-baseline.json"
 def snapshot(audits: List[RepoAudit]) -> Dict[str, Dict]:
     """Reduce an audit to the facts drift cares about.
 
-    ``billing`` is what is costing money *now* and is what :func:`find_drift`
-    compares. ``billable_if_restored`` is the separate, gating-independent
-    question "what would this cost if switched back on" - recorded because
-    reading an empty ``billing`` as "this repo is free" is exactly the mistake
-    that made a gated baseline look like a zero-cost one.
+    ``billing`` is the policy-violation set and is what :func:`find_drift`
+    compares - unchanged, so old baselines stay comparable.
+
+    The other three are the axes kept apart:
+
+    ``live_billing``   - costing money now, kept workflows included. The honest
+                         bill, and a superset of ``billing``.
+    ``restore_cost``   - gated and would bill again if restored. Disjoint from
+                         ``live_billing``.
+    ``billable_if_restored`` - the union: every workflow that costs money
+                         whenever it is not switched off.
     """
     out: Dict[str, Dict] = {}
     for audit in audits:
@@ -388,6 +502,8 @@ def snapshot(audits: List[RepoAudit]) -> Dict[str, Dict]:
         out[audit.repo] = {
             "base": audit.base,
             "billing": sorted(w.name for w in audit.billing),
+            "live_billing": sorted(w.name for w in audit.live_billing),
+            "restore_cost": sorted(w.name for w in audit.restore_cost),
             "billable_if_restored": sorted(
                 w.name for w in audit.billable_if_restored
             ),
