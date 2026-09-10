@@ -82,24 +82,46 @@ is what GitHub evaluates triggers from:
 Drift is one-directional: gating *more* than the baseline is never reported.
 Only regressions and newly-added ungated workflows fire.
 
-### `billing` is not `cost`
+### Three axes, decided separately
 
-The baseline records two different questions, and confusing them produces a
-wrong budget:
+Spend is three independent questions, and every wrong number this tool has
+produced came from answering one of them with another's evidence:
 
-- **`billing`** — what is burning minutes *right now*. A gated workflow is
-  absent from this list, correctly, because gating stopped the spend.
-- **`billable_if_restored`** — what it costs *whenever it is not gated*.
-  Computed from the original triggers that gating parked in a comment block,
-  and from `runs-on`, so it survives the switch being off.
+1. **Is anything automatic live?** — the triggers on the default branch.
+   `gated` explains why the answer is no; it does not decide it.
+2. **Would a run cost money?** — `local_ci/billing.py`, from the *restored*
+   triggers and `runs-on`, so it survives the switch being off.
+3. **Has it run lately?** — `local_ci/activity.py`, from run history
+   (`ci-local verify --activity`). `unknown` is a real answer and never
+   collapses into "dormant".
 
-`billing: []` therefore means "nothing is billing today", **not** "this repo is
-free". Restoring a repo whose `billing` is empty can still turn real spend back
-on; `billable_if_restored` is the number to price that decision against.
+The policy `keep` list is **not** a fourth axis. It records a decision we made
+about a workflow and changes nothing about what that workflow costs.
+
+The baseline therefore records four sets:
+
+- **`live_billing`** — putting minutes on the invoice today, kept workflows
+  included. This is the bill.
+- **`restore_cost`** — gated, and would bill again if restored. Disjoint from
+  `live_billing` by construction.
+- **`billable_if_restored`** — the union of the two: everything that costs
+  money whenever it is not switched off.
+- **`billing`** — the *policy-violation* set: live billing **minus** the keep
+  list. Despite the name it is not the bill. It exists because drift detection
+  compares it against a recorded baseline, and it must stay comparable.
+
+`billing: []` therefore means neither "this repo is free" nor "nothing is
+billing" — a repo whose only automatic workflow is a kept deploy has an empty
+`billing` and a real monthly cost. Price restores against `restore_cost` and
+budgets against `live_billing`.
 
 Cost is weighted by runner OS, not by workflow count — Linux 1x, Windows 2x,
 macOS 10x — and minutes are free on self-hosted runners and on public repos
 using standard runners.
+
+An idle live-billing workflow is still live-billing: it bills the moment
+someone pushes. Activity ranks retirement candidates; it never reclassifies
+spend.
 
 The watch is a launchd agent (macOS) or systemd user timer (Linux), not a
 scheduled GitHub Action — a job that polices Actions spend should not itself
