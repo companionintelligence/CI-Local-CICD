@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from local_ci.detect import Check, RepoPlan
-from local_ci.docs import dispatch_command, is_release, render, render_repo
+from local_ci.docs import (
+    RELEASE_REF_PLACEHOLDER,
+    dispatch_command,
+    is_release,
+    render,
+    render_repo,
+)
 from local_ci.verify import DispatchInput, RemoteWorkflow, RepoAudit
 
 
@@ -87,6 +93,42 @@ class TestRenderRepo:
         assert "### Run a check workflow on GitHub" in out
         assert "### Cut a release" in out
         assert out.index("Hub CI") < out.index("### Cut a release")
+
+    def test_release_commands_do_not_dispatch_on_the_default_branch(self):
+        """A release workflow resolves its version from the ref it ran on.
+
+        CI-Server's `publish.yml` does `tag="${GITHUB_REF#refs/tags/}"`, so a
+        branch ref yields `VERSION=refs/heads/main` — not a legal image tag. It
+        now refuses such a ref in every job, and its docs/CI.md carries a
+        hand-written warning that this generated block was wrong. This test is
+        what makes that warning unnecessary.
+        """
+        audit = RepoAudit("CI-Server", "main", workflows=[
+            wf("ci.yml", title="CI"),
+            wf("publish.yml", title="Publish"),
+        ])
+        out = "\n".join(render_repo(audit, None, "CI-Server"))
+
+        release_block = out[out.index("### Cut a release"):]
+        assert f"gh workflow run publish.yml" in release_block
+        assert RELEASE_REF_PLACEHOLDER in release_block
+        assert "--ref main" not in release_block
+
+        # The check workflow above it still uses the default branch, which is
+        # correct — only releases resolve a version from the ref.
+        check_block = out[
+            out.index("### Run a check workflow on GitHub"):out.index("### Cut a release")
+        ]
+        assert "--ref main" in check_block
+
+    def test_release_block_shows_how_to_make_the_tag(self):
+        audit = RepoAudit("CI-Server", "main", workflows=[wf("publish.yml")])
+        out = "\n".join(render_repo(audit, None, "CI-Server"))
+
+        # Naming the commit rather than checking it out — `git checkout main`
+        # fails outright in a git worktree when main is checked out elsewhere.
+        assert "git tag v2026.1.1 origin/main" in out
+        assert "git checkout" not in out
 
     def test_required_inputs_are_called_out(self):
         audit = RepoAudit("CI-Hub", "dev", workflows=[
