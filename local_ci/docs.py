@@ -64,6 +64,19 @@ def is_release(workflow: RemoteWorkflow) -> bool:
     return any(hint in name for hint in RELEASE_HINTS)
 
 
+#: What a release workflow must be dispatched on, in place of the default branch.
+#:
+#: A release workflow resolves its VERSION from the ref it ran on — CI-Server's
+#: `publish.yml` does `tag="${GITHUB_REF#refs/tags/}"` — so dispatching one on a
+#: branch yields `VERSION=refs/heads/main`, slashes and all, which is not a legal
+#: image tag. CI-Server added a `Refuse to publish a non-release ref` guard to
+#: every job in that workflow precisely because this document told people to do
+#: it, and CI-Server's own `docs/CI.md` carries a hand-maintained warning saying
+#: the generated block below it is wrong. Emitting a placeholder is what stops
+#: that warning being needed.
+RELEASE_REF_PLACEHOLDER = "<release-tag>"
+
+
 def dispatch_command(repo_slug: str, workflow: RemoteWorkflow, ref: str) -> str:
     parts = [
         "gh workflow run", workflow.name,
@@ -114,10 +127,21 @@ def render_repo(
                                       for i in required), ""]
 
     if releases:
-        lines += ["### Cut a release", ""]
+        lines += [
+            "### Cut a release", "",
+            f"Dispatch these on a **release tag**, never on `{audit.base}`: the "
+            "workflow resolves its version from the ref it ran on, so a branch "
+            "ref produces a version like `refs/heads/" + audit.base + "` rather "
+            "than a number. Tag the commit first, then dispatch on the tag:", "",
+            "```bash", f"git tag v2026.1.1 origin/{audit.base} && "
+            "git push origin v2026.1.1", "```", "",
+            "(Naming the commit rather than checking it out keeps this working "
+            "from a git worktree, where the default branch may already be "
+            "checked out elsewhere.)", "",
+        ]
         for wf in sorted(releases, key=lambda w: w.name):
             lines += [f"**{wf.title}** — `{wf.name}`", "", "```bash",
-                      dispatch_command(slug, wf, audit.base), "```", ""]
+                      dispatch_command(slug, wf, RELEASE_REF_PLACEHOLDER), "```", ""]
             required = [i for i in wf.inputs if i.required]
             if required:
                 lines += ["Required inputs: "
