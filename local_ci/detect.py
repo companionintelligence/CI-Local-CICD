@@ -135,7 +135,15 @@ def install_state(path: Path, manager: Optional[str]) -> Optional[str]:
     obvious; a stale one lets the checks run, and the first tool added since the
     last install fails with its own error - `next lint` reports "ESLint must be
     installed" - which reads as a lint failure in your branch rather than as an
-    install that predates the devDependency.
+    install that predates the devDependency. The top-level copy stays whatever
+    got hoisted there at install time, even once the manifest says otherwise,
+    because nothing rewrites it until an install runs.
+
+    Staleness is read from mtimes, comparing package.json and the lockfile
+    against the marker the manager leaves in `node_modules`. That is a
+    heuristic, so it is pointed the safe way - every install command here is
+    lockfile-frozen, which makes a false positive cost one reinstall and a
+    false negative cost an afternoon.
     """
     node_modules = path / "node_modules"
     if not node_modules.exists():

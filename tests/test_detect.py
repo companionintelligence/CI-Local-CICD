@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from local_ci.detect import (
+    LOCKFILE_MANAGERS,
     detect_node_manager,
     install_state,
     discover_repos,
@@ -38,7 +39,8 @@ def _install_tree(root, marker, installed_at, inputs_at):
     path.write_text("", encoding="utf-8")
     os.utime(path, (installed_at, installed_at))
     os.utime(path.parent, (installed_at, installed_at))
-    for name in ("package.json", "pnpm-lock.yaml", "yarn.lock"):
+    for name in ("package.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+                 "package-lock.json"):
         if (root / name).exists():
             os.utime(root / name, (inputs_at, inputs_at))
 
@@ -158,6 +160,37 @@ class TestNodePlan:
         os.utime(root / "pnpm-lock.yaml", (1_000, 1_000))
         os.utime(root / "package.json", (2_000, 2_000))
         assert install_state(root, None) == "node_modules is older than package.json"
+
+    def test_npm_lockfile_stale_is_flagged(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        _install_tree(root, "node_modules/.package-lock.json",
+                      installed_at=1_000, inputs_at=1_000)
+        os.utime(root / "package-lock.json", (3_000, 3_000))
+        plan = plan_for("repo", root)
+        assert any("older than package-lock.json" in n for n in plan.notes)
+
+    @pytest.mark.parametrize(
+        "manager,lockfile,marker",
+        [
+            ("pnpm", "pnpm-lock.yaml", "node_modules/.modules.yaml"),
+            ("npm", "package-lock.json", "node_modules/.package-lock.json"),
+        ],
+    )
+    def test_every_manager_with_a_marker(self, tmp_path, manager, lockfile, marker):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile=lockfile)
+        _install_tree(root, marker, installed_at=1_000, inputs_at=2_000)
+        assert install_state(root, manager) is not None
+        _install_tree(root, marker, installed_at=3_000, inputs_at=2_000)
+        assert install_state(root, manager) is None
+
+    def test_bun_falls_back_to_the_directory_mtime(self, tmp_path):
+        # bun leaves no marker this repo actually writes, so the directory's
+        # own mtime is all there is to compare against.
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="bun.lockb")
+        (root / "node_modules").mkdir()
+        os.utime(root / "node_modules", (1_000, 1_000))
+        os.utime(root / "bun.lockb", (2_000, 2_000))
+        assert install_state(root, "bun") is not None
 
 
 class TestOtherStacks:

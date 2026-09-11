@@ -193,8 +193,156 @@ def declared_triggers(text: str) -> List[str]:
     ]
 
 
+# `runs-on:` decides the price of a minute, so it has to be read even out of a
+# gated file. Matches the scalar and inline-sequence forms; the block-sequence
+# form is picked up by the continuation scan below.
+_RUNS_ON = re.compile(r"^\s*runs-on\s*:\s*(?P<rest>.*)$")
+_LABEL = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def _strip_comment(value: str) -> str:
+    """Drop a trailing ``# ...`` comment from a scalar YAML value."""
+    if "${{" in value:  # expressions can legitimately contain '#'
+        return value.strip()
+    head = value.split(" #", 1)[0]
+    return head.strip().strip("\"'")
+
+
+def runner_targets(text: str) -> List[List[str]]:
+    """One label group per ``runs-on:`` in the file.
+
+    Grouping is the whole point. ``runs-on: [self-hosted, macos-test]`` is a
+    *conjunction* - it selects one self-hosted machine carrying both labels, and
+    costs nothing. Flattening it into two labels invents a hosted macOS runner
+    and a 10x charge that does not exist.
+    """
+    lines, _ = split_lines(text)
+    targets: List[List[str]] = []
+
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        match = _RUNS_ON.match(line)
+        if not match:
+            continue
+        rest = match.group("rest").strip()
+        if "${{" in rest:
+            targets.append([_strip_comment(rest)])
+            continue
+        if rest.startswith("["):
+            group = [l for l in (_strip_comment(x) for x in _LABEL.findall(rest)) if l]
+            if group:
+                targets.append(group)
+            continue
+        if rest:
+            label = _strip_comment(rest)
+            if label:
+                targets.append([label])
+            continue
+        # Block sequence:  runs-on:\n  - self-hosted\n  - linux
+        indent = len(line) - len(line.lstrip())
+        group = []
+        for follow in lines[i + 1 :]:
+            if not follow.strip() or follow.lstrip().startswith("#"):
+                continue
+            if len(follow) - len(follow.lstrip()) <= indent:
+                break
+            if not follow.lstrip().startswith("- "):
+                break
+            label = _strip_comment(follow.lstrip()[2:])
+            if label:
+                group.append(label)
+        if group:
+            targets.append(group)
+    return targets
+
+
+def runner_labels(text: str) -> List[str]:
+    """Every ``runs-on:`` label in the file, flattened and deduplicated.
+
+    For display only - billing must use :func:`runner_targets`, which keeps the
+    grouping that says whether a job is self-hosted.
+    """
+    out: List[str] = []
+    for group in runner_targets(text):
+        for label in group:
+            if label not in out:
+                out.append(label)
+    return out
+
+
 def is_gated(text: str) -> bool:
     return BEGIN_MARKER in text and END_MARKER in text
+
+
+def _marker_span(lines: List[str]) -> Optional[Tuple[int, int]]:
+    """Indices of the gating markers: ``(begin, end)``, both inclusive.
+
+    Returns None when the file is not gated, or when the markers are present
+    but out of order - a half-applied edit should not be read as a gate.
+    """
+    begin = end = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if begin is None and stripped.startswith(BEGIN_MARKER):
+            begin = i
+        elif begin is not None and stripped.startswith(END_MARKER):
+            end = i
+            break
+    if begin is None or end is None:
+        return None
+    return begin, end
+
+
+def _uncomment(lines: List[str]) -> List[str]:
+    """Strip the one-space comment prefix :func:`gate` added."""
+    out = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("# "):
+            out.append(stripped[2:])
+        elif stripped.startswith("#"):
+            out.append(stripped[1:])
+        else:
+            out.append(line)
+    return out
+
+
+def original_on_block(text: str) -> Optional[str]:
+    """The pre-gating ``on:`` block, recovered from the marker comments.
+
+    :func:`gate` rewrites the live ``on:`` block down to ``workflow_dispatch``
+    and parks the real triggers in a comment block. Anything that asks a gated
+    file what it runs on therefore gets ``["workflow_dispatch"]`` - which reads
+    as "this workflow is free" when it actually means "we switched it off".
+    This reads the comment block back so the original answer stays available.
+
+    Returns None when the file is not gated.
+    """
+    if not is_gated(text):
+        return None
+    lines, _ = split_lines(text)
+    span = _marker_span(lines)
+    if span is None:
+        return None
+    begin, end = span
+    return "\n".join(_uncomment(lines[begin + 1 : end]))
+
+
+def restored_triggers(text: str) -> List[str]:
+    """Triggers this workflow would fire on if it were restored.
+
+    For an ungated workflow this is just :func:`declared_triggers`. For a gated
+    one it comes from the commented original, so gating cannot erase a
+    workflow's billing classification - the question "would restoring this cost
+    money?" stays answerable after the switch is off.
+    """
+    original = original_on_block(text)
+    if original is None:
+        return declared_triggers(text)
+    # Fall back to the live block if the comment block is unparseable, so a
+    # hand-edited marker degrades to the old answer rather than to silence.
+    return declared_triggers(original) or declared_triggers(text)
 
 
 def gate(text: str) -> Tuple[str, bool]:
@@ -247,22 +395,14 @@ def restore(text: str) -> Tuple[str, bool]:
         return text, False
 
     lines, ending = split_lines(text)
-    begin = next(i for i, l in enumerate(lines) if l.strip().startswith(BEGIN_MARKER))
-    end = next(
-        i
-        for i, l in enumerate(lines)
-        if i > begin and l.strip().startswith(END_MARKER)
-    )
+    span = _marker_span(lines)
+    if span is None:
+        # `is_gated` matches the marker anywhere, including mid-line; without
+        # a real marker pair there is nothing to restore.
+        return text, False
+    begin, end = span
 
-    original = []
-    for line in lines[begin + 1 : end]:
-        stripped = line.lstrip()
-        if stripped.startswith("# "):
-            original.append(stripped[2:])
-        elif stripped.startswith("#"):
-            original.append(stripped[1:])
-        else:
-            original.append(line)
+    original = _uncomment(lines[begin + 1 : end])
 
     # Drop the generated `on:` block that follows the marker. Slice the real
     # line list, never a re-split of the joined tail: joining swallows a

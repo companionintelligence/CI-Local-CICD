@@ -285,3 +285,86 @@ class TestCostAttribution:
         out = capsys.readouterr().out
         assert "billed repos with no local clone" in out
         assert "CI-Marketplace" in out
+
+
+class TestVerifyReport:
+    """The report `ci-local verify` actually prints.
+
+    #9 printed CI-Portal's live production deploy.yml under "not billing only
+    because they are gated". These pin the corrected wording and placement.
+    """
+
+    def _audits(self):
+        from local_ci.verify import RemoteWorkflow, RepoAudit
+
+        deploy = RemoteWorkflow(
+            name="deploy.yml", gated=False, triggers=["push", "workflow_dispatch"],
+            kept="CI-Portal/deploy.yml", runners=["ubuntu-latest"], private=True,
+        )
+        gated = RemoteWorkflow(
+            name="playwright.yml", gated=True, triggers=["workflow_dispatch"],
+            restored=["schedule"], runners=["ubuntu-latest"], private=True,
+        )
+        return [RepoAudit("CI-Portal", "dev",
+                          workflows=[deploy, gated], private=True)]
+
+    def _run(self, monkeypatch, workspace, policy_file, capsys, activities=None,
+             extra=()):
+        from local_ci import cli
+
+        audits = self._audits()
+        monkeypatch.setattr(cli, "audit_all", lambda *a, **k: audits)
+
+        def fake_measure(auds, slugs, **kwargs):
+            for audit in auds:
+                for wf in audit.workflows:
+                    if activities and wf.name in activities:
+                        wf.activity = activities[wf.name]
+            return auds
+
+        monkeypatch.setattr(cli, "measure_activity", fake_measure)
+        run(workspace, policy_file, "verify", *extra)
+        return capsys.readouterr().out, audits
+
+    def test_kept_deploy_is_listed_as_live_billing(
+        self, monkeypatch, workspace, policy_file, capsys
+    ):
+        out, _ = self._run(monkeypatch, workspace, policy_file, capsys)
+        assert "deploy.yml" in out
+        assert "(keep)" in out
+        assert "live billing: 1 workflow(s)" in out
+        assert "1 of them on the keep list" in out
+
+    def test_kept_deploy_is_not_in_the_dormant_section(
+        self, monkeypatch, workspace, policy_file, capsys
+    ):
+        out, _ = self._run(monkeypatch, workspace, policy_file, capsys)
+        dormant = out.split("not billing only because they are gated")[-1]
+        assert "deploy.yml" not in dormant
+        assert "playwright.yml" in dormant
+
+    def test_unknown_run_history_is_not_reported_as_idle(
+        self, monkeypatch, workspace, policy_file, capsys
+    ):
+        from local_ci.activity import RunActivity
+
+        out, _ = self._run(
+            monkeypatch, workspace, policy_file, capsys,
+            activities={"deploy.yml": RunActivity.unknown()},
+            extra=["--activity"],
+        )
+        assert "have not run in" not in out
+        assert "no readable run history" in out
+
+    def test_genuinely_idle_live_billing_is_flagged_but_still_billing(
+        self, monkeypatch, workspace, policy_file, capsys
+    ):
+        from local_ci.activity import from_runs
+
+        out, _ = self._run(
+            monkeypatch, workspace, policy_file, capsys,
+            activities={"deploy.yml": from_runs([])},
+            extra=["--activity"],
+        )
+        assert "have not run in 30d" in out
+        assert "live billing: 1 workflow(s)" in out
