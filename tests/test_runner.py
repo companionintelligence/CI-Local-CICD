@@ -15,8 +15,9 @@ def py(code: str):
     return [PY, "-c", code]
 
 
-def make_plan(tmp_path, checks, install=None, stack="python"):
-    return RepoPlan("repo", tmp_path, stack=stack, checks=checks, install=install)
+def make_plan(tmp_path, checks, install=None, stack="python", manager=None):
+    return RepoPlan("repo", tmp_path, stack=stack, checks=checks,
+                    install=install, manager=manager)
 
 
 def node_repo(root, installed_at, lock_at):
@@ -146,7 +147,26 @@ class TestRunPlan:
         )
         assert run_plan(plan).checks[0].name == "install"
 
-    def test_node_repo_installs_when_the_tree_is_stale(self, tmp_path):
+    def test_node_repo_installs_when_node_modules_is_stale(self, tmp_path):
+        """The tree exists but predates package.json - install before checking."""
+        (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+        marker = tmp_path / "node_modules" / ".modules.yaml"
+        marker.parent.mkdir()
+        marker.write_text("", encoding="utf-8")
+        os.utime(marker, (1_000, 1_000))
+        os.utime(marker.parent, (1_000, 1_000))
+        os.utime(tmp_path / "package.json", (2_000, 2_000))
+
+        plan = make_plan(
+            tmp_path,
+            [Check("test", py("pass"))],
+            install=Check("install", py("pass")),
+            stack="node",
+            manager="pnpm",
+        )
+        assert [c.name for c in run_plan(plan).checks] == ["install", "test"]
+
+    def test_node_repo_installs_when_the_tree_is_stale_npm(self, tmp_path):
         # A tree left over from before a dependency bump serves the superseded
         # package, so the checks run against versions the lockfile does not
         # describe. Reconcile it first rather than reporting that fiction.
@@ -161,6 +181,23 @@ class TestRunPlan:
         assert [c.name for c in run_plan(plan).checks] == ["install", "test"]
 
     def test_node_repo_skips_install_when_the_tree_is_current(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+        marker = tmp_path / "node_modules" / ".modules.yaml"
+        marker.parent.mkdir()
+        marker.write_text("", encoding="utf-8")
+        os.utime(tmp_path / "package.json", (1_000, 1_000))
+        os.utime(marker, (5_000, 5_000))
+
+        plan = make_plan(
+            tmp_path,
+            [Check("test", py("pass"))],
+            install=Check("install", py("pass")),
+            stack="node",
+            manager="pnpm",
+        )
+        assert [c.name for c in run_plan(plan).checks] == ["test"]
+
+    def test_node_repo_skips_install_when_the_tree_is_current_npm(self, tmp_path):
         node_repo(tmp_path, installed_at=2000, lock_at=1000)
         plan = make_plan(
             tmp_path,

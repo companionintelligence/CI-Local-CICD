@@ -101,58 +101,66 @@ def _node_install(manager: str) -> List[str]:
     }[manager]
 
 
-# What each manager writes inside `node_modules` when it reconciles the tree
-# with the lockfile; its mtime is when that last happened. bun has no such file
-# worth relying on, so it falls back to the directory's own mtime.
-NODE_INSTALL_MARKERS = {
-    "npm": ".package-lock.json",
-    "pnpm": ".modules.yaml",
-    "yarn": ".yarn-state.yml",
+# Files a package manager rewrites on every successful install. If the manifest
+# or a lockfile is newer than all of them, the tree on disk predates the current
+# dependency set.
+INSTALL_MARKERS = {
+    "pnpm": ["node_modules/.modules.yaml"],
+    "npm": ["node_modules/.package-lock.json"],
+    "yarn": [".yarn/install-state.gz", "node_modules/.yarn-integrity"],
+    "bun": ["node_modules/.bun-tag", "node_modules/.package-lock.json"],
 }
 
+# Whose mtime marks a change to the dependency set.
+INSTALL_INPUTS = ["package.json"] + [name for name, _ in LOCKFILE_MANAGERS]
 
-def node_install_reason(path: Path, manager: str) -> Optional[str]:
-    """Why the node tree has to be installed before checks run, or ``None``.
 
-    `node_modules` existing is not the same as `node_modules` being current.
-    A tree installed before a dependency bump keeps serving the superseded
-    package - the top-level copy stays whatever got hoisted there at install
-    time, even once the lockfile says otherwise, because nothing rewrites it
-    until an install runs. Checks then run against versions no commit
-    describes, and nothing in the output says so: a test fails, and the diff
-    that "broke" it does not exist.
+def _newest(path: Path, names: List[str]):
+    """(mtime, name) of the most recently touched of ``names``, or (None, "")."""
+    best, best_name = None, ""
+    for name in names:
+        try:
+            mtime = (path / name).stat().st_mtime
+        except OSError:
+            continue
+        if best is None or mtime > best:
+            best, best_name = mtime, name
+    return best, best_name
 
-    Staleness is read from mtimes, comparing the lockfile against the marker
-    the manager leaves in `node_modules`. That is a heuristic, so it is pointed
-    the safe way - every install command here is lockfile-frozen, which makes a
-    false positive cost one reinstall and a false negative cost an afternoon.
+
+def install_state(path: Path, manager: Optional[str]) -> Optional[str]:
+    """Why the installed tree cannot be trusted, or ``None`` if it looks current.
+
+    A stale ``node_modules`` is worse than a missing one. A missing one is
+    obvious; a stale one lets the checks run, and the first tool added since the
+    last install fails with its own error - `next lint` reports "ESLint must be
+    installed" - which reads as a lint failure in your branch rather than as an
+    install that predates the devDependency. The top-level copy stays whatever
+    got hoisted there at install time, even once the manifest says otherwise,
+    because nothing rewrites it until an install runs.
+
+    Staleness is read from mtimes, comparing package.json and the lockfile
+    against the marker the manager leaves in `node_modules`. That is a
+    heuristic, so it is pointed the safe way - every install command here is
+    lockfile-frozen, which makes a false positive cost one reinstall and a
+    false negative cost an afternoon.
     """
-    modules = path / "node_modules"
-    if not modules.exists():
+    node_modules = path / "node_modules"
+    if not node_modules.exists():
         return "node_modules missing"
 
-    locks = [path / name for name, mgr in LOCKFILE_MANAGERS if mgr == manager]
-    present = [f for f in locks if f.exists()]
-    if not present:
-        # No lockfile to be stale against - `install` would resolve fresh, so an
-        # existing tree is as good an answer as any.
-        return None
-
-    marker_name = NODE_INSTALL_MARKERS.get(manager)
-    marker = modules / marker_name if marker_name else None
-    try:
-        installed_at = (
-            marker.stat().st_mtime
-            if marker is not None and marker.exists()
-            else modules.stat().st_mtime
-        )
-        newest = max(present, key=lambda f: f.stat().st_mtime)
-        if newest.stat().st_mtime <= installed_at:
+    installed, _ = _newest(path, INSTALL_MARKERS.get(manager or "", []))
+    if installed is None:
+        # No marker we recognise; the directory's own mtime is the best proxy.
+        try:
+            installed = node_modules.stat().st_mtime
+        except OSError:
             return None
-    except OSError:
-        # Can't read the timestamps, so can't claim the tree is stale.
-        return None
-    return f"{newest.name} is newer than the installed tree"
+
+    newest, newest_name = _newest(path, INSTALL_INPUTS)
+    if newest is not None and newest > installed:
+        return f"node_modules is older than {newest_name}"
+    return None
 
 
 def workspace_globs(pkg: Dict, path: Path) -> List[str]:
@@ -355,9 +363,9 @@ def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
                     f"{len(extra)} check(s) from {len(packages)} workspace package(s)"
                 )
 
-        reason = node_install_reason(path, manager)
-        if reason:
-            plan.notes.append(f"{reason} - install required")
+        stale = install_state(path, manager)
+        if stale:
+            plan.notes.append(f"{stale} - install required")
         targets = makefile_targets(path)
         if targets:
             interesting = [t for t in ("build", "dev", "test", "up", "reset")
