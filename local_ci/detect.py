@@ -101,6 +101,60 @@ def _node_install(manager: str) -> List[str]:
     }[manager]
 
 
+# Files a package manager rewrites on every successful install. If the manifest
+# or a lockfile is newer than all of them, the tree on disk predates the current
+# dependency set.
+INSTALL_MARKERS = {
+    "pnpm": ["node_modules/.modules.yaml"],
+    "npm": ["node_modules/.package-lock.json"],
+    "yarn": [".yarn/install-state.gz", "node_modules/.yarn-integrity"],
+    "bun": ["node_modules/.bun-tag", "node_modules/.package-lock.json"],
+}
+
+# Whose mtime marks a change to the dependency set.
+INSTALL_INPUTS = ["package.json"] + [name for name, _ in LOCKFILE_MANAGERS]
+
+
+def _newest(path: Path, names: List[str]):
+    """(mtime, name) of the most recently touched of ``names``, or (None, "")."""
+    best, best_name = None, ""
+    for name in names:
+        try:
+            mtime = (path / name).stat().st_mtime
+        except OSError:
+            continue
+        if best is None or mtime > best:
+            best, best_name = mtime, name
+    return best, best_name
+
+
+def install_state(path: Path, manager: Optional[str]) -> Optional[str]:
+    """Why the installed tree cannot be trusted, or ``None`` if it looks current.
+
+    A stale ``node_modules`` is worse than a missing one. A missing one is
+    obvious; a stale one lets the checks run, and the first tool added since the
+    last install fails with its own error - `next lint` reports "ESLint must be
+    installed" - which reads as a lint failure in your branch rather than as an
+    install that predates the devDependency.
+    """
+    node_modules = path / "node_modules"
+    if not node_modules.exists():
+        return "node_modules missing"
+
+    installed, _ = _newest(path, INSTALL_MARKERS.get(manager or "", []))
+    if installed is None:
+        # No marker we recognise; the directory's own mtime is the best proxy.
+        try:
+            installed = node_modules.stat().st_mtime
+        except OSError:
+            return None
+
+    newest, newest_name = _newest(path, INSTALL_INPUTS)
+    if newest is not None and newest > installed:
+        return f"node_modules is older than {newest_name}"
+    return None
+
+
 def workspace_globs(pkg: Dict, path: Path) -> List[str]:
     """Workspace patterns from package.json, or pnpm-workspace.yaml."""
     raw = pkg.get("workspaces")
@@ -301,8 +355,9 @@ def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
                     f"{len(extra)} check(s) from {len(packages)} workspace package(s)"
                 )
 
-        if not (path / "node_modules").exists():
-            plan.notes.append("node_modules missing - install required")
+        stale = install_state(path, manager)
+        if stale:
+            plan.notes.append(f"{stale} - install required")
         targets = makefile_targets(path)
         if targets:
             interesting = [t for t in ("build", "dev", "test", "up", "reset")

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from local_ci.detect import (
     detect_node_manager,
+    install_state,
     discover_repos,
     makefile_targets,
     nested_checkouts,
@@ -27,6 +29,18 @@ def make_node_repo(tmp_path, scripts, lockfile=None, package_manager=None):
     if lockfile:
         (root / lockfile).write_text("", encoding="utf-8")
     return root
+
+
+def _install_tree(root, marker, installed_at, inputs_at):
+    """A node_modules whose install stamp and manifest mtimes are pinned."""
+    path = root / marker
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    os.utime(path, (installed_at, installed_at))
+    os.utime(path.parent, (installed_at, installed_at))
+    for name in ("package.json", "pnpm-lock.yaml", "yarn.lock"):
+        if (root / name).exists():
+            os.utime(root / name, (inputs_at, inputs_at))
 
 
 class TestManagerDetection:
@@ -108,6 +122,42 @@ class TestNodePlan:
         root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="yarn.lock")
         plan = plan_for("repo", root)
         assert any("node_modules missing" in n for n in plan.notes)
+
+    def test_stale_node_modules_is_flagged(self, tmp_path):
+        """An install older than the manifest is the eslint-was-just-added case."""
+        root = make_node_repo(tmp_path, {"lint": "next lint"},
+                              lockfile="pnpm-lock.yaml")
+        _install_tree(root, "node_modules/.modules.yaml",
+                      installed_at=1_000, inputs_at=2_000)
+        plan = plan_for("repo", root)
+        assert any("older than package.json" in n for n in plan.notes)
+
+    def test_stale_against_the_lockfile_names_the_lockfile(self, tmp_path):
+        root = make_node_repo(tmp_path, {"lint": "next lint"},
+                              lockfile="pnpm-lock.yaml")
+        _install_tree(root, "node_modules/.modules.yaml",
+                      installed_at=1_000, inputs_at=1_000)
+        os.utime(root / "pnpm-lock.yaml", (3_000, 3_000))
+        plan = plan_for("repo", root)
+        assert any("older than pnpm-lock.yaml" in n for n in plan.notes)
+
+    def test_current_node_modules_is_not_flagged(self, tmp_path):
+        root = make_node_repo(tmp_path, {"lint": "next lint"},
+                              lockfile="pnpm-lock.yaml")
+        _install_tree(root, "node_modules/.modules.yaml",
+                      installed_at=5_000, inputs_at=1_000)
+        plan = plan_for("repo", root)
+        assert not any("install required" in n for n in plan.notes)
+
+    def test_unknown_manager_falls_back_to_the_directory_mtime(self, tmp_path):
+        """No marker we recognise still beats reporting a stale tree as current."""
+        root = make_node_repo(tmp_path, {"lint": "eslint ."},
+                              lockfile="pnpm-lock.yaml")
+        (root / "node_modules").mkdir()
+        os.utime(root / "node_modules", (1_000, 1_000))
+        os.utime(root / "pnpm-lock.yaml", (1_000, 1_000))
+        os.utime(root / "package.json", (2_000, 2_000))
+        assert install_state(root, None) == "node_modules is older than package.json"
 
 
 class TestOtherStacks:

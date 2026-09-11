@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .detect import Check, RepoPlan
+from .detect import Check, RepoPlan, install_state
 
 DEFAULT_TIMEOUT = 1800  # 30 min; the longest hosted job in the report was ~25
 TAIL_LINES = 40
@@ -135,8 +135,11 @@ def run_plan(
     result = RepoResult(plan.repo, plan.stack, notes=list(plan.notes))
 
     queue: List[Check] = []
+    # A stale tree, not just a missing one: an install that predates the current
+    # package.json/lockfile makes every later check report the wrong failure.
     needs_install = install or (
-        plan.stack == "node" and not (plan.path / "node_modules").exists()
+        plan.stack == "node"
+        and install_state(plan.path, plan.manager) is not None
     )
     if plan.install and needs_install:
         queue.append(plan.install)
