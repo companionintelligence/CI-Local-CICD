@@ -1,0 +1,42 @@
+name: PR gate
+
+# This repo has no automatic CI of any kind, despite already having a working,
+# fast pytest suite (461 tests, ~2s) covering the trigger-gating/restore logic
+# it uses to manage CI for the REST of the org's repos. Found during an
+# org-level CI/CD health audit: a bug here has an outsized blast radius,
+# since this tool edits workflow files fleet-wide.
+#
+# Deliberately minimal: checkout, Python, pip install the two real
+# dependencies (pytest, pyyaml — everything else this repo imports is
+# stdlib), run the suite. No lint/typecheck added here — scope this PR to
+# "the tests that already exist now actually run somewhere."
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pytest pyyaml
+
+      - name: Run the test suite
+        run: python -m pytest tests/ -q
