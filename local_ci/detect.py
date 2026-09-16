@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -33,6 +34,10 @@ LOCKFILE_MANAGERS = [
     ("bun.lock", "bun"),
     ("package-lock.json", "npm"),
 ]
+
+MANAGER_LOCKFILES: Dict[str, List[str]] = {}
+for _lockfile, _manager in LOCKFILE_MANAGERS:
+    MANAGER_LOCKFILES.setdefault(_manager, []).append(_lockfile)
 
 
 @dataclass
@@ -72,10 +77,50 @@ def _read_json(path: Path) -> Dict:
         return {}
 
 
+def _is_git_tracked(path: Path, filename: str) -> bool:
+    """Whether ``filename`` is committed in ``path``'s repo, not just present on disk.
+
+    A package manager can leave a lockfile on disk that git never tracked, or no
+    longer tracks — gitignored by policy (a repo that installs from the manifest
+    alone), mid-migration to a different manager, or just a stale local `install`
+    predating the manifest's current dependencies. `Path.exists()` cannot tell
+    that apart from a committed lockfile, so a frozen install (`npm ci` and
+    friends) must not trust one without checking.
+
+    When ``path`` is not inside a git repo at all, there is nothing to check
+    against, so this assumes tracked and leaves behaviour unchanged — every real
+    caller reaches this via `discover_repos`, which already requires a `.git`,
+    so that fallback only matters for bare test fixtures.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", filename],
+            cwd=path,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        return True
+    if result.returncode == 0:
+        return True
+    return b"not a git repository" in result.stderr
+
+
+def _has_tracked_lockfile(path: Path, manager: str) -> bool:
+    return any(
+        (path / lockfile).exists() and _is_git_tracked(path, lockfile)
+        for lockfile in MANAGER_LOCKFILES.get(manager, [])
+    )
+
+
 def detect_node_manager(path: Path, pkg: Dict) -> str:
-    """Lockfile wins over the ``packageManager`` field, which is often stale."""
+    """Lockfile wins over the ``packageManager`` field, which is often stale.
+
+    Only a lockfile git actually tracks counts as a signal — see
+    :func:`_is_git_tracked` for why an untracked one on disk cannot be trusted.
+    """
     for lockfile, manager in LOCKFILE_MANAGERS:
-        if (path / lockfile).exists():
+        if (path / lockfile).exists() and _is_git_tracked(path, lockfile):
             return manager
     declared = str(pkg.get("packageManager", ""))
     for manager in ("pnpm", "yarn", "bun", "npm"):
@@ -92,12 +137,28 @@ def _node_run(manager: str, script: str) -> List[str]:
     return [manager, "run", script]
 
 
-def _node_install(manager: str) -> List[str]:
+def _node_install(manager: str, frozen: bool) -> List[str]:
+    """The install command for ``manager``.
+
+    The frozen forms (`npm ci`, `--immutable`, `--frozen-lockfile`) require an
+    exact, trustworthy lockfile and fail loudly when the manifest has moved on
+    without it — exactly what you want when git tracks that lockfile as part of
+    the repo's contract. When it does not (see :func:`_has_tracked_lockfile`),
+    the same strictness just means every install command fails the moment
+    anyone touches a dependency, so this falls back to a plain install.
+    """
+    if frozen:
+        return {
+            "pnpm": ["pnpm", "install", "--frozen-lockfile"],
+            "yarn": ["yarn", "install", "--immutable"],
+            "bun": ["bun", "install", "--frozen-lockfile"],
+            "npm": ["npm", "ci"],
+        }[manager]
     return {
-        "pnpm": ["pnpm", "install", "--frozen-lockfile"],
-        "yarn": ["yarn", "install", "--immutable"],
-        "bun": ["bun", "install", "--frozen-lockfile"],
-        "npm": ["npm", "ci"],
+        "pnpm": ["pnpm", "install"],
+        "yarn": ["yarn", "install"],
+        "bun": ["bun", "install"],
+        "npm": ["npm", "install"],
     }[manager]
 
 
@@ -330,7 +391,8 @@ def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
         scripts = pkg.get("scripts", {}) or {}
         manager = detect_node_manager(path, pkg)
         plan = RepoPlan(repo, path, stack="node", manager=manager)
-        plan.install = Check("install", _node_install(manager), required=True)
+        frozen = _has_tracked_lockfile(path, manager)
+        plan.install = Check("install", _node_install(manager, frozen), required=True)
 
         for slot, aliases in NODE_CHECKS:
             for alias in aliases:

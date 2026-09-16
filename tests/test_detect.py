@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,19 @@ def make_node_repo(tmp_path, scripts, lockfile=None, package_manager=None):
     if lockfile:
         (root / lockfile).write_text("", encoding="utf-8")
     return root
+
+
+def _git_init(root):
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+
+
+def _git_commit(root, *files):
+    subprocess.run(["git", "add", "--", *files], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "test"], cwd=root, check=True,
+                   stdout=subprocess.DEVNULL)
 
 
 def _install_tree(root, marker, installed_at, inputs_at):
@@ -191,6 +205,55 @@ class TestNodePlan:
         os.utime(root / "node_modules", (1_000, 1_000))
         os.utime(root / "bun.lockb", (2_000, 2_000))
         assert install_state(root, "bun") is not None
+
+
+class TestUntrackedLockfile:
+    """A lockfile that merely exists on disk is not evidence git tracks it.
+
+    Regression for CI-Hermes: a stale, gitignored `package-lock.json` (left over
+    from before a `package.json` dependency was added) made `npm ci` fail even
+    though the repo has never committed a lockfile at all — its Dockerfile and
+    its own GitHub Actions CI both install via plain `npm install`, by design.
+    Detection must trust `Path.exists()` only once git confirms the file is
+    actually part of the repo, not just sitting in the working tree.
+    """
+
+    def test_untracked_lockfile_gets_a_plain_install(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        _git_init(root)
+        _git_commit(root, "package.json")  # lockfile deliberately left untracked
+        plan = plan_for("repo", root)
+        assert plan.manager == "npm"
+        assert plan.install.argv == ["npm", "install"]
+
+    def test_tracked_lockfile_still_gets_a_frozen_install(self, tmp_path):
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        _git_init(root)
+        _git_commit(root, "package.json", "package-lock.json")
+        plan = plan_for("repo", root)
+        assert plan.install.argv == ["npm", "ci"]
+
+    def test_untracked_lockfile_does_not_win_manager_detection(self, tmp_path):
+        """A leftover lockfile from a different manager must not steer script commands."""
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="yarn.lock")
+        _git_init(root)
+        _git_commit(root, "package.json")  # yarn.lock deliberately left untracked
+        assert detect_node_manager(root, {}) == "npm"
+
+    def test_repo_with_no_lockfile_at_all_gets_a_plain_install(self, tmp_path):
+        """A clean checkout of a repo that never committed a lockfile."""
+        root = make_node_repo(tmp_path, {"test": "vitest"})
+        _git_init(root)
+        _git_commit(root, "package.json")
+        plan = plan_for("repo", root)
+        assert plan.manager == "npm"
+        assert plan.install.argv == ["npm", "install"]
+
+    def test_bare_directory_without_git_is_unaffected(self, tmp_path):
+        """No repo to check against at all: behaviour matches the old, ungated check."""
+        root = make_node_repo(tmp_path, {"test": "vitest"}, lockfile="package-lock.json")
+        plan = plan_for("repo", root)
+        assert plan.install.argv == ["npm", "ci"]
 
 
 class TestOtherStacks:
