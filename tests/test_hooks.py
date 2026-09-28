@@ -48,47 +48,47 @@ class TestGitDir:
 
 class TestInstall:
     def test_writes_an_executable_hook(self, repo):
-        result = install(repo, CLI)
+        result = install(repo, CLI, apply=True)
         assert result.action == "installed"
         path = hook_file(repo)
         assert path.exists()
         assert os.stat(path).st_mode & stat.S_IXUSR
 
     def test_hook_carries_the_sentinel_and_repo_name(self, repo):
-        install(repo, CLI)
+        install(repo, CLI, apply=True)
         body = hook_file(repo).read_text(encoding="utf-8")
         assert SENTINEL in body
         assert "CI-Server" in body
         assert str(CLI) in body
 
     def test_hook_is_bypassable(self, repo):
-        install(repo, CLI)
+        install(repo, CLI, apply=True)
         body = hook_file(repo).read_text(encoding="utf-8")
         assert "SKIP_LOCAL_CI" in body
         assert "--no-verify" in body
 
     def test_reinstall_is_idempotent(self, repo):
-        install(repo, CLI)
-        result = install(repo, CLI)
+        install(repo, CLI, apply=True)
+        result = install(repo, CLI, apply=True)
         assert result.action == "skipped"
         assert result.detail == "already current"
 
     def test_changed_checks_update_our_own_hook(self, repo):
-        install(repo, CLI, checks=["test"])
-        result = install(repo, CLI, checks=["lint", "test"])
+        install(repo, CLI, checks=["test"], apply=True)
+        result = install(repo, CLI, checks=["lint", "test"], apply=True)
         assert result.action == "updated"
         assert "lint,test" in hook_file(repo).read_text(encoding="utf-8")
 
     def test_unmanaged_hook_is_not_clobbered(self, repo):
         hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
-        result = install(repo, CLI)
+        result = install(repo, CLI, apply=True)
         assert result.action == "skipped"
         assert "--force" in result.detail
         assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
 
     def test_force_backs_up_the_existing_hook(self, repo):
         hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
-        result = install(repo, CLI, force=True)
+        result = install(repo, CLI, force=True, apply=True)
         assert result.action == "updated"
         backup = repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local"
         assert "echo mine" in backup.read_text(encoding="utf-8")
@@ -99,40 +99,141 @@ class TestInstall:
             "original\n", encoding="utf-8"
         )
         hook_file(repo).write_text("#!/bin/sh\necho second\n", encoding="utf-8")
-        result = install(repo, CLI, force=True)
+        result = install(repo, CLI, force=True, apply=True)
         assert result.action == "skipped"
         assert "backup already exists" in result.detail
 
     def test_non_repo_is_skipped(self, tmp_path):
-        assert install(tmp_path, CLI).action == "skipped"
+        assert install(tmp_path, CLI, apply=True).action == "skipped"
 
     def test_hooks_dir_is_created_when_absent(self, tmp_path):
         root = tmp_path / "repo"
         (root / ".git").mkdir(parents=True)
-        assert install(root, CLI).action == "installed"
+        assert install(root, CLI, apply=True).action == "installed"
 
 
 class TestUninstall:
     def test_removes_our_hook(self, repo):
-        install(repo, CLI)
-        result = uninstall(repo)
+        install(repo, CLI, apply=True)
+        result = uninstall(repo, apply=True)
         assert result.action == "removed"
         assert not hook_file(repo).exists()
 
     def test_restores_a_backed_up_hook(self, repo):
         hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
-        install(repo, CLI, force=True)
-        uninstall(repo)
+        install(repo, CLI, force=True, apply=True)
+        uninstall(repo, apply=True)
         assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
 
     def test_leaves_unmanaged_hooks_alone(self, repo):
         hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
-        result = uninstall(repo)
+        result = uninstall(repo, apply=True)
         assert result.action == "skipped"
         assert hook_file(repo).exists()
 
     def test_no_hook_installed(self, repo):
-        assert uninstall(repo).action == "skipped"
+        assert uninstall(repo, apply=True).action == "skipped"
+
+
+def tree(root):
+    """Every file under ``root`` with its bytes and mode, plus every dir."""
+    return {
+        str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mode)
+        if p.is_file() else None
+        for p in sorted(root.rglob("*"))
+    }
+
+
+def mine(repo):
+    hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+
+def ours(repo, checks=("test",)):
+    install(repo, CLI, checks=list(checks), apply=True)
+
+
+def backed_up(repo):
+    mine(repo)
+    install(repo, CLI, force=True, apply=True)
+
+
+def stale_backup(repo):
+    (repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local").write_text(
+        "original\n", encoding="utf-8"
+    )
+    mine(repo)
+
+
+def no_hooks_dir(repo):
+    (repo / ".git" / "hooks").rmdir()
+
+
+def not_a_repo(repo):
+    (repo / ".git" / "hooks").rmdir()
+    (repo / ".git").rmdir()
+
+
+INSTALL_CASES = {
+    "fresh": (lambda repo: None, {}),
+    "hooks dir absent": (no_hooks_dir, {}),
+    "already current": (ours, {"checks": ["test"]}),
+    "our hook, new checks": (ours, {"checks": ["lint", "test"]}),
+    "unmanaged hook": (mine, {}),
+    "unmanaged hook, --force": (mine, {"force": True}),
+    "--force, backup exists": (stale_backup, {"force": True}),
+    "not a repo": (not_a_repo, {}),
+}
+
+UNINSTALL_CASES = {
+    "our hook": ours,
+    "our hook over a backup": backed_up,
+    "unmanaged hook": mine,
+    "no hook": lambda repo: None,
+    "not a repo": not_a_repo,
+}
+
+
+class TestDryRun:
+    """Without ``apply``, report what ``apply`` would do and touch nothing.
+
+    ``hooks install`` used to write unconditionally, so anyone who ran it
+    expecting the usual dry run rewrote the hook in every workspace repo. Each
+    case checks both halves: the tree is byte-identical afterwards, and the
+    dry-run result is the one the real run then returns - same action, same
+    detail - so the preview can be trusted.
+    """
+
+    @pytest.mark.parametrize("case", INSTALL_CASES)
+    def test_install(self, repo, case):
+        arrange, kwargs = INSTALL_CASES[case]
+        arrange(repo)
+        before = tree(repo)
+
+        preview = install(repo, CLI, **kwargs)
+        assert tree(repo) == before
+
+        assert install(repo, CLI, apply=True, **kwargs) == preview
+
+    @pytest.mark.parametrize("case", UNINSTALL_CASES)
+    def test_uninstall(self, repo, case):
+        UNINSTALL_CASES[case](repo)
+        before = tree(repo)
+
+        preview = uninstall(repo)
+        assert tree(repo) == before
+
+        assert uninstall(repo, apply=True) == preview
+
+    def test_force_preview_leaves_the_unmanaged_hook_in_place(self, repo):
+        mine(repo)
+        assert install(repo, CLI, force=True).action == "updated"
+        assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
+        assert not (repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local").exists()
+
+    def test_uninstall_preview_keeps_our_hook(self, repo):
+        ours(repo)
+        assert uninstall(repo).action == "removed"
+        assert SENTINEL in hook_file(repo).read_text(encoding="utf-8")
 
 
 def test_rendered_hook_is_valid_shell():
@@ -208,7 +309,8 @@ class TestWorktreePush:
             f"'--policy', {str(policy)!r}, *sys.argv[1:]]))\n",
             encoding="utf-8",
         )
-        assert install(co.main, shim, sys.executable, ["test"]).action == "installed"
+        result = install(co.main, shim, sys.executable, ["test"], apply=True)
+        assert result.action == "installed"
         return co
 
     @staticmethod

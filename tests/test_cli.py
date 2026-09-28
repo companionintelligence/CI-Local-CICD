@@ -250,29 +250,75 @@ class TestRunAtPath:
 
 
 class TestHooksCommand:
-    def test_install_then_uninstall(self, tmp_path, policy_file, capsys):
+    @pytest.fixture
+    def repo(self, tmp_path):
         repo = tmp_path / "CI-Server"
         (repo / ".git" / "hooks").mkdir(parents=True)
         (repo / "package.json").write_text(
             json.dumps({"name": "s", "scripts": {"test": "exit 0"}}),
             encoding="utf-8",
         )
-        args = ["--workspace", str(tmp_path), "--policy", str(policy_file), "hooks"]
-        main(args + ["install"])
+        return repo
+
+    @staticmethod
+    def hooks(tmp_path, policy_file, *args):
+        return main([
+            "--workspace", str(tmp_path), "--policy", str(policy_file),
+            "hooks", *args,
+        ])
+
+    def test_install_then_uninstall(self, tmp_path, policy_file, repo, capsys):
+        self.hooks(tmp_path, policy_file, "install", "--apply")
         hook = repo / ".git" / "hooks" / "pre-push"
         assert hook.exists()
-        main(args + ["uninstall"])
+        self.hooks(tmp_path, policy_file, "uninstall", "--apply")
         assert not hook.exists()
+        assert "dry run" not in capsys.readouterr().out
+
+    def test_install_is_a_dry_run_without_apply(
+        self, tmp_path, policy_file, repo, capsys
+    ):
+        """Every other command previews by default; this one used to write
+        straight into `.git/hooks` of every workspace repo."""
+        assert self.hooks(tmp_path, policy_file, "install") == 0
+        assert not (repo / ".git" / "hooks" / "pre-push").exists()
+        out = capsys.readouterr().out
+        assert "installed CI-Server" in out
+        assert str(repo / ".git" / "hooks" / "pre-push") in out
+        assert "dry run: nothing written (1 installed). Re-run with --apply." in out
+
+    def test_uninstall_is_a_dry_run_without_apply(
+        self, tmp_path, policy_file, repo, capsys
+    ):
+        self.hooks(tmp_path, policy_file, "install", "--apply")
+        capsys.readouterr()
+        self.hooks(tmp_path, policy_file, "uninstall")
+        assert (repo / ".git" / "hooks" / "pre-push").exists()
+        out = capsys.readouterr().out
+        assert "removed   CI-Server" in out
+        assert "(1 removed). Re-run with --apply." in out
+
+    def test_dry_run_with_nothing_to_change(
+        self, tmp_path, policy_file, repo, capsys
+    ):
+        self.hooks(tmp_path, policy_file, "install", "--apply")
+        capsys.readouterr()
+        self.hooks(tmp_path, policy_file, "install")
+        out = capsys.readouterr().out
+        assert "already current" in out
+        assert "dry run: no hooks to change." in out
 
     def test_repos_without_checks_are_skipped(self, tmp_path, policy_file, capsys):
         repo = tmp_path / "Docs"
         (repo / ".git" / "hooks").mkdir(parents=True)
-        main([
-            "--workspace", str(tmp_path), "--policy", str(policy_file),
-            "hooks", "install",
-        ])
+        self.hooks(tmp_path, policy_file, "install", "--apply")
         assert "no local checks detected" in capsys.readouterr().out
         assert not (repo / ".git" / "hooks" / "pre-push").exists()
+
+    @pytest.mark.parametrize("action", ["install", "uninstall"])
+    def test_apply_defaults_off(self, action):
+        assert build_parser().parse_args(["hooks", action]).apply is False
+        assert build_parser().parse_args(["hooks", action, "--apply"]).apply is True
 
 
 class TestRepoScoping:

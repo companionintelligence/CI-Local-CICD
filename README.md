@@ -42,8 +42,9 @@ Every command is a dry run until you pass `--apply`.
 ./ci-local run --repo CI-Server
 ./ci-local run --only test --jobs 6 --report /tmp/ci.json
 
-# Run them automatically before every push
+# Run them automatically before every push (dry run, then apply)
 ./ci-local hooks install
+./ci-local hooks install --apply
 
 # Cap artifact retention — storage is billed wherever the job ran, so
 # gating does nothing for it
@@ -213,8 +214,10 @@ in a tmp dir, then `git config user.email …`) would inherit it and write into
 the real repo's shared `.git/config`.
 
 Hooks installed before this change still check the main clone until
-`ci-local hooks install` is re-run. That command writes immediately; it has no
-dry run.
+`ci-local hooks install --apply` is re-run. Without `--apply` it lists, per repo,
+whether the hook would be installed, updated or skipped, and writes nothing;
+with it, it rewrites `.git/hooks/pre-push` in every repo it matches, so preview
+first or scope it with `--repo`.
 
 ### Tests
 

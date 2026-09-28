@@ -15,8 +15,9 @@ ci-local run --repo <REPO>
 # Run everything that changed across the workspace
 ci-local run --all
 
-# Install the pre-push hook so you cannot forget
+# Install the pre-push hook so you cannot forget (dry run, then apply)
 ci-local hooks install
+ci-local hooks install --apply
 ```
 
 To start a gated workflow on GitHub you need the `gh` CLI and push access:

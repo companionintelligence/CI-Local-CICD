@@ -41,7 +41,7 @@ python3 -m pytest -q            # from repo root; 483 tests, 20-70s on a loaded 
 ./ci-local audit --usage ~/Downloads/usageReport.csv   # what would change, what it saves
 ./ci-local plan --runnable-only                        # local equivalent of each repo's CI
 ./ci-local run --repo CI-Server                        # run those checks here
-./ci-local hooks install                               # run them automatically before every push
+./ci-local hooks install --apply                       # run them automatically before every push
 ./ci-local gate --apply                                # rewrite workflows to manual-only
 ./ci-local ship --apply                                # open a gating PR per repo
 ```
@@ -52,7 +52,7 @@ python3 -m pytest -q            # from repo root; 483 tests, 20-70s on a loaded 
 
 ## Cross-repo connections
 
-- `ci-local hooks install` puts a `pre-push` hook in a repo that shells out to `ci-local --repo <repo> run --path <pushing tree>` before every push, replacing that repo's billed GitHub-hosted CI with local checks (bypass: `SKIP_LOCAL_CI=1` or `git push --no-verify`). The hook lives in the git dir all worktrees share; `--path` makes a worktree push check that worktree, not the main clone. `hooks install` writes immediately to every matched repo, so there is no `--apply` dry run.
+- `ci-local hooks install` puts a `pre-push` hook in a repo that shells out to `ci-local --repo <repo> run --path <pushing tree>` before every push, replacing that repo's billed GitHub-hosted CI with local checks (bypass: `SKIP_LOCAL_CI=1` or `git push --no-verify`). The hook lives in the git dir all worktrees share; `--path` makes a worktree push check that worktree, not the main clone. Like every other command, `hooks install` and `hooks uninstall` only report what they would change until you pass `--apply`; with it they rewrite `.git/hooks/pre-push` in every matched repo, so preview first or scope with `--repo`.
 - `ci-local ship` opens a gating PR against other repos' real default branches (resolved per repo — e.g. `dev` for CI-Hub/CI-Marketplace/CI-Portal) via a throwaway worktree; it never commits from the shared clone
 - `ci-local.toml`'s `repos.aliases` maps a local clone directory to its current GitHub name for repos renamed upstream (e.g. `CI-Applet` → `CI-Capture`)
 - Reads GitHub Actions billing usage CSVs (exported from GitHub billing) to price what gating saves

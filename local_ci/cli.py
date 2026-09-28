@@ -5,7 +5,8 @@
     ci-local restore [--repo X] [--apply]  put the original triggers back
     ci-local plan   [--repo X] [--path P]  show the detected local checks
     ci-local run    [--repo X] [--path P]  run those checks locally
-    ci-local hooks install|uninstall       manage the pre-push hook
+    ci-local hooks install [--apply]       add the pre-push hook
+    ci-local hooks uninstall [--apply]     remove it
 
 Nothing writes to disk without ``--apply``; every command defaults to a dry run.
 """
@@ -541,6 +542,7 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     policy = Policy.load(args.policy)
     cli_path = REPO_ROOT / "ci-local"
     checks = args.only.split(",") if args.only else None
+    pending: Dict[str, int] = defaultdict(int)
     for repo_path in discover_repos(args.workspace, args.repo):
         if args.action == "install":
             plan = plan_for(repo_path.name, repo_path, policy.override_for(repo_path.name))
@@ -548,11 +550,22 @@ def cmd_hooks(args: argparse.Namespace) -> int:
                 print(f"  skip     {repo_path.name}  (no local checks detected)")
                 continue
             result = install_hook(
-                repo_path, cli_path, sys.executable, checks, force=args.force
+                repo_path, cli_path, sys.executable, checks,
+                force=args.force, apply=args.apply,
             )
         else:
-            result = uninstall_hook(repo_path)
+            result = uninstall_hook(repo_path, apply=args.apply)
+        if result.action != "skipped":
+            pending[result.action] += 1
         print(f"  {result.action:<10}{result.repo}  {result.detail}")
+
+    if args.apply:
+        return 0
+    if not pending:
+        print("\ndry run: no hooks to change.")
+    else:
+        counts = ", ".join(f"{n} {action}" for action, n in pending.items())
+        print(f"\ndry run: nothing written ({counts}). Re-run with --apply.")
     return 0
 
 
@@ -700,6 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hooks_p = add_command(sub, "hooks", help="manage the pre-push hook")
     hooks_p.add_argument("action", choices=["install", "uninstall"])
+    hooks_p.add_argument("--apply", action="store_true", help="write changes")
     hooks_p.add_argument("--only", help="comma-separated checks for the hook")
     hooks_p.add_argument(
         "--force", action="store_true",
