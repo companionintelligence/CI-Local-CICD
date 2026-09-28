@@ -22,6 +22,13 @@ SENTINEL = "# managed-by: ci-local"
 # instead of 26 seconds - which teaches people to reach for SKIP_LOCAL_CI=1.
 # `ci-local` now also accepts `--repo` after the subcommand, so both orders
 # work, but the canonical global-first form is what gets written here.
+#
+# `--path` is the other half of "this repo". The hook file lives in the git dir
+# that every worktree shares, and `--repo` alone resolves against the workspace
+# - so a push from `CI-Capture/.claude/worktrees/x` was gated on the main
+# clone's checkout: a red `main` rejected a green branch, and a green `main`
+# would pass a broken one. git starts the hook at the pushing worktree's root,
+# so that root is what gets checked; `--repo` still names the policy entry.
 
 HOOK_TEMPLATE = """#!/usr/bin/env bash
 {sentinel}
@@ -40,13 +47,16 @@ if [ ! -x "$CI_LOCAL" ] && [ ! -f "$CI_LOCAL" ]; then
   exit 0
 fi
 
-echo "local-ci: running {checks} for {repo}"
-"{python}" "$CI_LOCAL" --repo "{repo}" run --only "{checks}" --quiet
+# The tree being pushed: every worktree runs this same file, from its own root.
+REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+echo "local-ci: running {checks} for {repo} in $REPO_PATH"
+"{python}" "$CI_LOCAL" --repo "{repo}" run --path "$REPO_PATH" --only "{checks}" --quiet
 status=$?
 if [ $status -ne 0 ]; then
   echo "" >&2
   echo "local-ci: checks failed - push aborted." >&2
-  echo "          re-run with: {python} $CI_LOCAL --repo {repo} run" >&2
+  echo "          re-run with: {python} $CI_LOCAL --repo {repo} run --path '$REPO_PATH'" >&2
   echo "          bypass with: SKIP_LOCAL_CI=1 git push" >&2
 fi
 exit $status

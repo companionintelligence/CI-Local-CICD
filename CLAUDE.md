@@ -32,7 +32,7 @@ pip install pytest pyyaml
 # no dev server — it's a CLI you invoke directly, not a service
 
 # Run tests (gated by .github/workflows/pr-gate.yml)
-python3 -m pytest -q            # from repo root; 466 tests, ~3s (2026-09-15)
+python3 -m pytest -q            # from repo root; 483 tests, 20-70s on a loaded dev Mac (2026-09-27)
 
 # Build for production
 # no build step — nothing is compiled or bundled
@@ -52,7 +52,7 @@ python3 -m pytest -q            # from repo root; 466 tests, ~3s (2026-09-15)
 
 ## Cross-repo connections
 
-- `ci-local hooks install` puts a `pre-push` hook in a repo that shells out to `ci-local --repo <repo> run` before every push, replacing that repo's billed GitHub-hosted CI with local checks (bypass: `SKIP_LOCAL_CI=1` or `git push --no-verify`)
+- `ci-local hooks install` puts a `pre-push` hook in a repo that shells out to `ci-local --repo <repo> run --path <pushing tree>` before every push, replacing that repo's billed GitHub-hosted CI with local checks (bypass: `SKIP_LOCAL_CI=1` or `git push --no-verify`). The hook lives in the git dir all worktrees share; `--path` makes a worktree push check that worktree, not the main clone. `hooks install` writes immediately to every matched repo, so there is no `--apply` dry run.
 - `ci-local ship` opens a gating PR against other repos' real default branches (resolved per repo — e.g. `dev` for CI-Hub/CI-Marketplace/CI-Portal) via a throwaway worktree; it never commits from the shared clone
 - `ci-local.toml`'s `repos.aliases` maps a local clone directory to its current GitHub name for repos renamed upstream (e.g. `CI-Applet` → `CI-Capture`)
 - Reads GitHub Actions billing usage CSVs (exported from GitHub billing) to price what gating saves

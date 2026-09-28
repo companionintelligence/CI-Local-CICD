@@ -81,6 +81,25 @@ class TestRunCheck:
         code = "import os,sys; sys.exit(0 if os.environ.get('CI')=='true' else 1)"
         assert run_check(Check("test", py(code)), plan, 30).status == "pass"
 
+    def test_hook_git_dir_does_not_reach_the_check(self, tmp_path, monkeypatch):
+        """A worktree push exports ``GIT_DIR`` to the hook.
+
+        Passed through, a test that builds a scratch repo - ``git init`` in a
+        tmp dir, then ``git config user.email`` - writes into the pushing
+        repo's shared ``.git/config`` instead. The rest of the env survives.
+        """
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "Main/.git/worktrees/wt"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "wt"))
+        monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "index"))
+        monkeypatch.setenv("KEEP_ME", "1")
+        plan = make_plan(tmp_path, [])
+        code = (
+            "import os,sys; e=os.environ; "
+            "sys.exit(0 if not {'GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE'} & set(e) "
+            "and e.get('KEEP_ME')=='1' else 1)"
+        )
+        assert run_check(Check("test", py(code)), plan, 30).status == "pass"
+
 
 class TestRunPlan:
     def test_all_checks_run_when_passing(self, tmp_path):

@@ -9,6 +9,7 @@ because a plan that invents commands produces failures nobody trusts.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -89,8 +90,8 @@ def _is_git_tracked(path: Path, filename: str) -> bool:
 
     When ``path`` is not inside a git repo at all, there is nothing to check
     against, so this assumes tracked and leaves behaviour unchanged — every real
-    caller reaches this via `discover_repos`, which already requires a `.git`,
-    so that fallback only matters for bare test fixtures.
+    caller reaches this via `discover_repos` or `resolve_checkout`, which both
+    require a repo, so that fallback only matters for bare test fixtures.
     """
     try:
         result = subprocess.run(
@@ -98,6 +99,7 @@ def _is_git_tracked(path: Path, filename: str) -> bool:
             cwd=path,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            env=git_env(),
         )
     except OSError:
         return True
@@ -489,6 +491,71 @@ def _warn_nested(plan: RepoPlan) -> RepoPlan:
             f"report findings for code you did not write."
         )
     return plan
+
+
+# What `git rev-parse --local-env-vars` lists: the variables that pick a
+# repository regardless of the directory git runs in.
+GIT_LOCATION_VARS = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+})
+
+
+def git_env() -> Dict[str, str]:
+    """``os.environ`` minus the variables that override where git looks.
+
+    git exports ``GIT_DIR`` into every hook - on a push from a worktree it is
+    that worktree's private gitdir - and it outranks both ``cwd`` and
+    ``git -C``. A question about "the repo at this path" asked from inside the
+    pre-push hook has to drop it, or git answers about the pushing tree instead.
+    """
+    return {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
+
+
+@dataclass
+class Checkout:
+    """One working tree, and the name the policy knows its repo by."""
+
+    repo: str
+    path: Path
+
+
+def resolve_checkout(path: Path) -> Checkout:
+    """The working-tree root containing ``path``, and its canonical repo name.
+
+    A linked worktree sits somewhere like ``CI-Capture/.claude/worktrees/x``,
+    so its own directory name means nothing to ``ci-local.toml``. The name that
+    keys ``[checks.<repo>]`` and ``aliases`` is the main clone's - what
+    :func:`discover_repos` calls it - and every worktree shares the main clone's
+    git dir, so ``--git-common-dir`` leads back to it.
+
+    Raises ``ValueError`` when ``path`` is not inside a working tree.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse",
+             "--show-toplevel", "--git-common-dir"],
+            capture_output=True, text=True, env=git_env(),
+        )
+    except OSError as exc:
+        raise ValueError(f"cannot run git: {exc}") from exc
+    lines = proc.stdout.splitlines()
+    if proc.returncode or len(lines) != 2:
+        raise ValueError(f"{path} is not inside a git working tree")
+
+    root = Path(lines[0])
+    # Relative to the directory git ran in, e.g. `../.git` from a subdirectory.
+    common = (Path(path) / lines[1]).resolve()
+    if common.name == ".git":
+        repo = common.parent.name
+    elif common.suffix == ".git":  # worktree of a bare repo: `CI-Capture.git`
+        repo = common.stem
+    else:  # `--separate-git-dir`: nothing to borrow a name from
+        repo = root.name
+    return Checkout(repo, root)
 
 
 def discover_repos(workspace: Path, only: Optional[List[str]] = None) -> List[Path]:
