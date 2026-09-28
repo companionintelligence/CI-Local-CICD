@@ -105,19 +105,28 @@ def install(
     python: str = "python3",
     checks: Optional[List[str]] = None,
     force: bool = False,
+    apply: bool = False,
 ) -> HookResult:
-    """Write the hook, backing up anything we did not write ourselves."""
+    """Write the hook, backing up anything we did not write ourselves.
+
+    The action is decided before anything is touched, so without ``apply`` the
+    result is exactly what ``apply`` would report and nothing is written - not
+    the hook, not the backup, not even the hooks dir. ``hooks install`` used to
+    write unconditionally, which rewrote the hook in every workspace repo for
+    anyone who ran it expecting the usual dry run.
+    """
     repo = repo_path.name
     gitdir = git_dir(repo_path)
     if gitdir is None:
         return HookResult(repo, "skipped", "not a git repository")
 
     hooks_dir = gitdir / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
     hook_path = hooks_dir / HOOK_NAME
+    backup = hooks_dir / f"{HOOK_NAME}.pre-ci-local"
     body = render_hook(repo, cli_path, python, checks or ["lint", "typecheck", "test"])
 
     action = "installed"
+    displace = False
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8", errors="replace")
         if SENTINEL in existing:
@@ -125,25 +134,34 @@ def install(
                 return HookResult(repo, "skipped", "already current")
             action = "updated"
         elif force:
-            backup = hooks_dir / f"{HOOK_NAME}.pre-ci-local"
             if backup.exists():
                 return HookResult(
                     repo, "skipped", f"backup already exists at {backup}"
                 )
-            hook_path.rename(backup)
             action = "updated"
+            displace = True
         else:
             return HookResult(
                 repo, "skipped", "existing unmanaged hook (use --force)"
             )
 
+    result = HookResult(repo, action, str(hook_path))
+    if not apply:
+        return result
+
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    if displace:
+        hook_path.rename(backup)
     hook_path.write_text(body, encoding="utf-8")
     hook_path.chmod(hook_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
-    return HookResult(repo, action, str(hook_path))
+    return result
 
 
-def uninstall(repo_path: Path) -> HookResult:
-    """Remove our hook and restore any hook we displaced."""
+def uninstall(repo_path: Path, apply: bool = False) -> HookResult:
+    """Remove our hook and restore any hook we displaced.
+
+    As with :func:`install`, nothing changes on disk without ``apply``.
+    """
     repo = repo_path.name
     gitdir = git_dir(repo_path)
     if gitdir is None:
@@ -155,9 +173,15 @@ def uninstall(repo_path: Path) -> HookResult:
     if SENTINEL not in hook_path.read_text(encoding="utf-8", errors="replace"):
         return HookResult(repo, "skipped", "hook not managed by ci-local")
 
-    hook_path.unlink()
     backup = gitdir / "hooks" / f"{HOOK_NAME}.pre-ci-local"
-    if backup.exists():
+    restore = backup.exists()
+    result = HookResult(
+        repo, "removed", "restored previous hook" if restore else str(hook_path)
+    )
+    if not apply:
+        return result
+
+    hook_path.unlink()
+    if restore:
         backup.rename(hook_path)
-        return HookResult(repo, "removed", "restored previous hook")
-    return HookResult(repo, "removed", str(hook_path))
+    return result
