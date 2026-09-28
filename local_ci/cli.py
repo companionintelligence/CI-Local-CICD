@@ -3,8 +3,8 @@
     ci-local audit  [--usage report.csv]   what would change, and what it saves
     ci-local gate   [--repo X] [--apply]   rewrite workflows to manual-only
     ci-local restore [--repo X] [--apply]  put the original triggers back
-    ci-local plan   [--repo X]             show the detected local checks
-    ci-local run    [--repo X] [--all]     run those checks locally
+    ci-local plan   [--repo X] [--path P]  show the detected local checks
+    ci-local run    [--repo X] [--path P]  run those checks locally
     ci-local hooks install|uninstall       manage the pre-push hook
 
 Nothing writes to disk without ``--apply``; every command defaults to a dry run.
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import __version__
-from .detect import discover_repos, plan_for
+from .detect import discover_repos, plan_for, resolve_checkout
 from .hooks import install as install_hook
 from .hooks import uninstall as uninstall_hook
 from .policy import DEFAULT_POLICY_FILE, Policy, classify
@@ -208,8 +208,31 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 def _plans(args: argparse.Namespace):
     policy = Policy.load(args.policy)
+    if getattr(args, "path", None) is not None:
+        return [_checkout_plan(args.path, args.repo, policy)]
     repos = discover_repos(args.workspace, args.repo)
     return [plan_for(p.name, p, policy.override_for(p.name)) for p in repos]
+
+
+def _checkout_plan(path: Path, names: Optional[List[str]], policy: Policy):
+    """The plan for one explicit checkout - what the pre-push hook runs.
+
+    Hooks live in the git dir that every worktree of a repo shares, so a hook
+    that named only ``--repo`` got the workspace's main clone back from
+    ``discover_repos`` and checked whatever *it* had checked out, no matter
+    which worktree was pushing: a red ``main`` rejected a green branch, and a
+    green ``main`` would wave a broken one through. The tree comes from
+    ``--path``; the name that keys the policy comes from ``--repo`` or, absent
+    that, from the main clone the checkout belongs to.
+    """
+    if names and len(names) > 1:
+        raise SystemExit("ci-local: --path is one checkout; pass at most one --repo")
+    try:
+        checkout = resolve_checkout(path)
+    except ValueError as exc:
+        raise SystemExit(f"ci-local: --path: {exc}")
+    repo = names[0] if names else checkout.repo
+    return plan_for(repo, checkout.path, policy.override_for(repo))
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -534,6 +557,10 @@ def cmd_hooks(args: argparse.Namespace) -> int:
 
 
 REPO_HELP = "limit to this repo (repeatable); valid before or after the subcommand"
+PATH_HELP = (
+    "check the checkout at this path (e.g. a worktree) instead of the "
+    "workspace clone; config is looked up under --repo, else its main clone"
+)
 
 
 def add_command(sub, name: str, **kwargs) -> argparse.ArgumentParser:
@@ -591,9 +618,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--runnable-only", action="store_true",
         help="hide repos with no detected checks",
     )
+    plan_p.add_argument("--path", type=Path, help=PATH_HELP)
     plan_p.set_defaults(func=cmd_plan)
 
     run_p = add_command(sub, "run", help="run local checks")
+    run_p.add_argument("--path", type=Path, help=PATH_HELP)
     run_p.add_argument("--only", help="comma-separated check names")
     run_p.add_argument("--install", action="store_true", help="force dependency install")
     run_p.add_argument("--jobs", type=int, default=4, help="repos in parallel")

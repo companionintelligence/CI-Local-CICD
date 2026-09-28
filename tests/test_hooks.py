@@ -5,12 +5,16 @@ from __future__ import annotations
 import os
 import shlex
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
-from local_ci.cli import build_parser
+from local_ci.cli import REPO_ROOT, build_parser
 from local_ci.hooks import HOOK_NAME, SENTINEL, git_dir, install, render_hook, uninstall
+
+from .gitrepo import commit, git, make_checkouts, requires_git
+from .test_cli import green_policy
 
 CLI = Path("/opt/ci/ci-local")
 
@@ -161,6 +165,7 @@ def test_hook_command_line_scopes_to_this_repo():
     args = build_parser().parse_args(argv)
     assert args.command == "run"
     assert args.repo == ["CI-Server"]
+    assert args.path == Path("$REPO_PATH")  # the pushing tree, not the workspace's
     assert args.only == "lint,test"
     assert args.report is None  # not misread as a report path
     assert args.quiet is True
@@ -174,3 +179,67 @@ def test_failure_hint_is_a_command_that_parses():
     args = build_parser().parse_args(argv)
     assert args.repo == ["CI-Server"]
     assert args.command == "run"
+    assert args.path == Path("$REPO_PATH")
+
+
+@requires_git
+class TestWorktreePush:
+    """A real ``git push`` through the installed hook, from a real worktree.
+
+    Hooks live in the git dir every worktree shares, and the hook used to name
+    only ``--repo`` - which resolves against the workspace - so a push from
+    ``.claude/worktrees/<x>`` was gated on whatever the main clone had checked
+    out. Observed 2026-09-27: a CI-Capture branch that passed fmt, clippy and
+    tests was rejected because the main clone, on ``main``, failed fmt.
+    """
+
+    def _arm(self, tmp_path):
+        co = make_checkouts(tmp_path / "ws")
+        policy = green_policy(tmp_path / "policy.toml")
+        # The hook runs the real CLI. The shim only aims it at this workspace
+        # and policy, where a `--repo`-only lookup finds the main clone exactly
+        # as it does in the real workspace.
+        shim = tmp_path / "ci-local"
+        shim.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+            "from local_ci.cli import main\n"
+            f"raise SystemExit(main(['--workspace', {str(co.main.parent)!r}, "
+            f"'--policy', {str(policy)!r}, *sys.argv[1:]]))\n",
+            encoding="utf-8",
+        )
+        assert install(co.main, shim, sys.executable, ["test"]).action == "installed"
+        return co
+
+    @staticmethod
+    def _push(checkout, branch):
+        proc = git(checkout, "push", "-q", "origin", branch, check=False)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_green_branch_is_not_blocked_by_a_red_main_clone(self, tmp_path):
+        co = self._arm(tmp_path)
+        (co.worktree / "GREEN").write_text("", encoding="utf-8")
+        commit(co.worktree, "go green", "GREEN")
+
+        code, out = self._push(co.worktree, "feature")
+        assert code == 0, out
+        assert f"in {co.worktree}" in out
+
+    def test_red_branch_is_not_waved_through_by_a_green_main_clone(self, tmp_path):
+        co = self._arm(tmp_path)
+        (co.main / "GREEN").write_text("", encoding="utf-8")
+        commit(co.main, "main is green", "GREEN")  # the worktree's branch is not
+
+        code, out = self._push(co.worktree, "feature")
+        assert code != 0, out
+        assert "push aborted" in out
+        assert f"--path '{co.worktree}'" in out  # the re-run hint targets it too
+
+    def test_main_clone_push_still_checks_the_main_clone(self, tmp_path):
+        co = self._arm(tmp_path)
+        (co.main / "GREEN").write_text("", encoding="utf-8")
+        commit(co.main, "main is green", "GREEN")
+
+        code, out = self._push(co.main, "main")
+        assert code == 0, out
+        assert f"in {co.main}\n" in out

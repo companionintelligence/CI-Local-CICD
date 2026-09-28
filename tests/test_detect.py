@@ -11,14 +11,18 @@ import pytest
 
 from local_ci.detect import (
     LOCKFILE_MANAGERS,
+    Checkout,
     detect_node_manager,
     install_state,
     discover_repos,
     makefile_targets,
     nested_checkouts,
     plan_for,
+    resolve_checkout,
     workspace_globs,
 )
+
+from .gitrepo import git, make_checkouts, requires_git
 
 
 def make_node_repo(tmp_path, scripts, lockfile=None, package_manager=None):
@@ -318,6 +322,57 @@ class TestDiscovery:
         (tmp_path / "a" / ".git").mkdir(parents=True)
         (tmp_path / "c" / ".git").mkdir(parents=True)
         assert [p.name for p in discover_repos(tmp_path, ["c"])] == ["c"]
+
+
+@requires_git
+class TestResolveCheckout:
+    """Which tree ``--path`` means, and which policy entry it answers to."""
+
+    def test_main_clone(self, tmp_path):
+        co = make_checkouts(tmp_path)
+        assert resolve_checkout(co.main) == Checkout("Demo", co.main)
+
+    def test_subdirectory_resolves_to_the_root(self, tmp_path):
+        co = make_checkouts(tmp_path)
+        (co.main / "src").mkdir()
+        assert resolve_checkout(co.main / "src") == Checkout("Demo", co.main)
+
+    def test_worktree_is_its_own_tree_but_named_for_its_main_clone(self, tmp_path):
+        # `feature` is the worktree's directory; `[checks.Demo]` is the entry.
+        co = make_checkouts(tmp_path)
+        assert resolve_checkout(co.worktree) == Checkout("Demo", co.worktree)
+
+    def test_worktree_outside_the_main_clone(self, tmp_path):
+        co = make_checkouts(tmp_path)
+        elsewhere = tmp_path / "scratch" / "wt"
+        git(co.main, "worktree", "add", "-q", "-b", "other", str(elsewhere))
+        assert resolve_checkout(elsewhere) == Checkout("Demo", elsewhere.resolve())
+
+    def test_worktree_of_a_bare_repo(self, tmp_path):
+        co = make_checkouts(tmp_path)
+        bare = tmp_path / "Mirror.git"
+        git(tmp_path, "clone", "-q", "--bare", str(co.main), str(bare))
+        wt = tmp_path / "mirror-wt"
+        git(bare, "worktree", "add", "-q", str(wt), "main")
+        assert resolve_checkout(wt).repo == "Mirror"
+
+    def test_not_a_checkout(self, tmp_path):
+        with pytest.raises(ValueError, match="not inside a git working tree"):
+            resolve_checkout(tmp_path)
+
+    def test_exported_git_dir_is_ignored(self, tmp_path, monkeypatch):
+        """The hook inherits ``GIT_DIR`` from the push; ``--path`` must win.
+
+        With it honoured, a subdirectory would be taken for the root and the
+        repo named after whichever git dir the variable pointed at.
+        """
+        co = make_checkouts(tmp_path)
+        other = tmp_path / "Other"
+        other.mkdir()
+        git(other, "init", "-q")
+        (co.worktree / "src").mkdir()
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+        assert resolve_checkout(co.worktree / "src") == Checkout("Demo", co.worktree)
 
 
 class TestOverrides:

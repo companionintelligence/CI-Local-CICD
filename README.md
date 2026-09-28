@@ -192,6 +192,30 @@ the lockfile doesn't describe, and nothing in the output says so. Every install
 command is lockfile-frozen (`npm ci`, `--frozen-lockfile`, `--immutable`), so
 reinstalling on a false positive costs time and nothing else.
 
+### The pre-push hook checks the tree being pushed
+
+A repo's hooks live in the git dir that all its worktrees share, so the same
+`pre-push` file runs for a push from the main clone and for one from
+`.claude/worktrees/<name>`. The hook passes its own working-tree root as
+`--path`, so each push is gated on the tree that is actually being pushed, not on
+whatever the main clone has checked out. `--repo` still names the
+`[checks.<repo>]` entry, and without it `--path` falls back to the main clone's
+directory name, not the worktree's.
+
+```bash
+./ci-local run --path ~/devel/ci/CI-Capture/.claude/worktrees/x   # what the hook runs
+./ci-local plan --path .                                          # what it would run here
+```
+
+Checks also run without git's location variables. A push from a worktree
+exports `GIT_DIR` to the hook. Any test that builds a scratch repo (`git init`
+in a tmp dir, then `git config user.email …`) would inherit it and write into
+the real repo's shared `.git/config`.
+
+Hooks installed before this change still check the main clone until
+`ci-local hooks install` is re-run. That command writes immediately; it has no
+dry run.
+
 ### Tests
 
 ```bash

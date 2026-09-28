@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
 from local_ci.cli import build_parser, load_usage, main, workflow_files
 
+from .gitrepo import make_checkouts, requires_git
 from .test_workflows import MANUAL_ONLY, MAPPING
 
 USAGE_CSV = """\
@@ -184,6 +186,67 @@ class TestRunCommand:
         ])
         assert code == 1
         assert "no runnable repos" in capsys.readouterr().err
+
+
+GREEN_ONLY = "import pathlib, sys; sys.exit(0 if pathlib.Path('GREEN').exists() else 1)"
+
+
+def green_policy(path, repo="Demo"):
+    """``[checks.<repo>]`` whose one check passes only where a ``GREEN`` file is."""
+    argv = json.dumps([sys.executable, "-c", GREEN_ONLY])
+    path.write_text(
+        f'[checks.{repo}]\ncommands = [{{ name = "test", run = {argv} }}]\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+@requires_git
+class TestRunAtPath:
+    """``--path`` checks the tree it names, not the workspace's clone of it."""
+
+    @pytest.fixture
+    def co(self, tmp_path):
+        co = make_checkouts(tmp_path / "ws")
+        (co.worktree / "GREEN").write_text("", encoding="utf-8")  # main stays red
+        return co
+
+    @pytest.fixture
+    def policy(self, tmp_path):
+        return green_policy(tmp_path / "policy.toml")
+
+    def _main(self, co, policy, *argv):
+        return main([
+            "--workspace", str(co.main.parent), "--policy", str(policy), *argv,
+        ])
+
+    def test_checks_the_worktree_not_the_main_clone(self, co, policy, capsys):
+        assert self._main(co, policy, "--repo", "Demo", "run",
+                          "--path", str(co.worktree), "--quiet") == 0
+        # The same `--repo` without `--path` is the main clone, which is red.
+        assert self._main(co, policy, "--repo", "Demo", "run", "--quiet") == 1
+
+    def test_policy_entry_comes_from_the_main_clone(self, co, policy, capsys):
+        """No ``--repo``: the directory is ``feature``, the entry is ``Demo``."""
+        assert self._main(co, policy, "run", "--path", str(co.worktree)) == 0
+        assert "Demo" in capsys.readouterr().out
+
+    def test_subdirectory_checks_the_whole_worktree(self, co, policy, capsys):
+        (co.worktree / "src").mkdir()
+        assert self._main(co, policy, "run", "--path", str(co.worktree / "src")) == 0
+
+    def test_plan_takes_a_path_too(self, co, policy, capsys):
+        assert self._main(co, policy, "plan", "--path", str(co.worktree)) == 0
+        assert "Demo  [custom]" in capsys.readouterr().out
+
+    def test_more_than_one_repo_is_refused(self, co, policy):
+        with pytest.raises(SystemExit, match="at most one --repo"):
+            self._main(co, policy, "--repo", "Demo", "--repo", "Other", "run",
+                       "--path", str(co.worktree))
+
+    def test_path_outside_any_checkout_is_refused(self, co, policy, tmp_path):
+        with pytest.raises(SystemExit, match="not inside a git working tree"):
+            self._main(co, policy, "run", "--path", str(tmp_path))
 
 
 class TestHooksCommand:

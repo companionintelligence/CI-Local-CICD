@@ -8,7 +8,6 @@ a failing command is what you need, and that is what gets reported.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import time
@@ -16,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .detect import Check, RepoPlan, install_state
+from .detect import Check, RepoPlan, git_env, install_state
 
 DEFAULT_TIMEOUT = 1800  # 30 min; the longest hosted job in the report was ~25
 TAIL_LINES = 40
@@ -75,7 +74,12 @@ def run_check(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
             reason=f"`{check.argv[0]}` not on PATH",
         )
 
-    env = dict(os.environ)
+    # Not `os.environ` verbatim: a push from a worktree hands the hook
+    # `GIT_DIR`, and any test that builds a scratch repo (`git init` in a tmp
+    # dir, then `git config user.email ...`) would write into the real repo's
+    # shared config instead. Without it, git finds the repo from `plan.path`,
+    # exactly as in a manual run.
+    env = git_env()
     # Make local runs look like CI to the tools that care, so snapshot and
     # watch-mode defaults match what the hosted runners did.
     env.setdefault("CI", "true")
