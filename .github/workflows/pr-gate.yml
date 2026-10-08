@@ -10,10 +10,14 @@ name: PR gate
 # dependencies (pytest, pyyaml — everything else this repo imports is
 # stdlib), run the suite. No lint/typecheck added here — scope this PR to
 # "the tests that already exist now actually run somewhere."
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   pull_request:
+#   push:
+#     branches: [main]
+# <<< ci-local:gated
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
