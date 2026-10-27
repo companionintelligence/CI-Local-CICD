@@ -1,11 +1,4 @@
 # Local CI/CD Tooling for CI-Server
-
-## COPYRIGHT COMPANION INTELLIGENCE - LIFESCOPE INC
-
-## DO NOT DISTRIBUTE
-
-## PRIVATE AND CONFIDENTIAL
-
 [CloudFlare ZeroTrust Proxy Tutorial](https://docs.google.com/document/d/1zsFws3DiKwXNGd5hF0prV1OFkR6H7oNLQubNlucqETo/edit?tab=t.0)
 
 ---
