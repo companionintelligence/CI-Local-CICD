@@ -1,4 +1,18 @@
-# Local CI/CD Tooling for CI-Server
+<h1 align="center">Local CI/CD Tooling for CI-Server</h1>
+
+<p align="center"><strong>Local CI/CD tooling for Companion Intelligence repositories.</strong></p>
+
+[![release](https://img.shields.io/badge/release-not%20published-757575?style=flat-square)](https://github.com/companionintelligence/CI-Local-CICD/releases)
+[![platform](https://img.shields.io/badge/platform-Node.js%20%C2%B7%20macOS%20%C2%B7%20Linux-0a6358?style=flat-square)](https://github.com/companionintelligence/CI-Local-CICD)
+[![License](https://img.shields.io/badge/license-Commercial%20Standard-8a5a00?style=flat-square)](LICENSE.md)
+[![Discord](https://img.shields.io/badge/chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.com/invite/yQp9hwpzAa)
+
+<p align="center"><a href="#quick-start">Get started</a> · <a href="#license">License</a> · <a href="https://docs.ci.computer/docs/reference/open-source-systems">Systems map</a> · <a href="README.md#overview">Documentation</a></p>
+
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Open%20quick%20start-Open%20quick%20start-0a6358?style=for-the-badge&logo=github&logoColor=white" alt="Open quick start" height="30"></a>
+</p>
+
 [CloudFlare ZeroTrust Proxy Tutorial](https://docs.google.com/document/d/1zsFws3DiKwXNGd5hF0prV1OFkR6H7oNLQubNlucqETo/edit?tab=t.0)
 
 ---
@@ -219,6 +233,28 @@ python3 -m pytest -q
 ```
 
 ---
+
+
+## Features
+
+| Feature | What it provides |
+|---|---|
+| **Policy discovery** | Read repo policy and workflow definitions before proposing changes. |
+| **Safe dry run** | Show trigger and retention diffs before applying them. |
+| **Local checks** | Map affected repos to local lint, test and build commands. |
+| **Worktree delivery** | Coordinate isolated branches and PR creation from clean trees. |
+
+## How it fits together
+
+The local runner reads the repository's CI policy, builds a proposed workflow diff, and then either applies the gated workflow or executes the corresponding local check.
+
+```mermaid
+flowchart LR
+  Repo[Repository workflows] --> Detect[Policy and command detection]
+  Detect --> Plan[Dry-run plan]
+  Plan --> Apply[Approved workflow change]
+  Detect --> Run[Local lint, test or build]
+```
 
 ## Overview
 
@@ -501,6 +537,29 @@ graph TD
 ```
 
 ---
+
+<!-- companion-hub-readme-deep-review -->
+
+## Workflow policy at a glance
+
+| Policy | Effect |
+|---|---|
+| Default gate | Converts eligible automatic CI workflows to manual triggers after review |
+| `keep` | Leaves deployment and release workflows automatic |
+| `force_gate` | Explicitly gates a selected workflow, including CI-Hub nightly when configured |
+| `exclude` | Skips repositories that should not be rewritten |
+| Restore | Reinstates the exact saved workflow triggers |
+
+```mermaid
+flowchart LR
+  Inspect[Inspect repo and policy] --> Dry[Dry-run proposed workflow changes]
+  Dry --> Review[Review diff and exceptions]
+  Review --> Apply[Apply gate policy]
+  Apply --> Local[Run local checks or ship through worktree]
+  Apply --> Restore[Restore saved triggers if needed]
+```
+
+Run the dry-run first and inspect the per-repository diff before applying changes. `keep`, `force_gate`, and `exclude` are policy controls, not interchangeable shortcuts; see the configuration and drift-watch sections for their exact behavior.
 
 ## Support
 
