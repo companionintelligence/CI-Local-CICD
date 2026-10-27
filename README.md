@@ -506,6 +506,29 @@ graph TD
 
 ---
 
+<!-- companion-hub-readme-deep-review -->
+
+## Workflow policy at a glance
+
+| Policy | Effect |
+|---|---|
+| Default gate | Converts eligible automatic CI workflows to manual triggers after review |
+| `keep` | Leaves deployment and release workflows automatic |
+| `force_gate` | Explicitly gates a selected workflow, including CI-Hub nightly when configured |
+| `exclude` | Skips repositories that should not be rewritten |
+| Restore | Reinstates the exact saved workflow triggers |
+
+```mermaid
+flowchart LR
+  Inspect[Inspect repo and policy] --> Dry[Dry-run proposed workflow changes]
+  Dry --> Review[Review diff and exceptions]
+  Review --> Apply[Apply gate policy]
+  Apply --> Local[Run local checks or ship through worktree]
+  Apply --> Restore[Restore saved triggers if needed]
+```
+
+Run the dry-run first and inspect the per-repository diff before applying changes. `keep`, `force_gate`, and `exclude` are policy controls, not interchangeable shortcuts; see the configuration and drift-watch sections for their exact behavior.
+
 ## Support
 
 For issues related to:
