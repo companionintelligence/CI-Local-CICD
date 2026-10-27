@@ -2,7 +2,7 @@
 
 <p align="center"><strong>Local CI/CD tooling for Companion Intelligence repositories.</strong></p>
 
-<p align="center"><a href="#quick-start">Get started</a> · <a href="#license">License</a></p>
+<p align="center"><a href="#quick-start">Get started</a> · <a href="#license">License</a> · <a href="https://docs.ci.computer/docs/reference/open-source-systems">Systems map</a></p>
 [CloudFlare ZeroTrust Proxy Tutorial](https://docs.google.com/document/d/1zsFws3DiKwXNGd5hF0prV1OFkR6H7oNLQubNlucqETo/edit?tab=t.0)
 
 ---
