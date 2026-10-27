@@ -1,4 +1,8 @@
-# Local CI/CD Tooling for CI-Server
+<h1 align="center">Local CI/CD Tooling for CI-Server</h1>
+
+<p align="center"><strong>Local CI/CD tooling for Companion Intelligence repositories.</strong></p>
+
+<p align="center"><a href="#quick-start">Get started</a> · <a href="#license">License</a></p>
 [CloudFlare ZeroTrust Proxy Tutorial](https://docs.google.com/document/d/1zsFws3DiKwXNGd5hF0prV1OFkR6H7oNLQubNlucqETo/edit?tab=t.0)
 
 ---
