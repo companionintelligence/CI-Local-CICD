@@ -16,7 +16,6 @@
 keep = [
   # Deploy on merge. Breaking these means merged code silently never ships.
   "CI-Portal/deploy.yml",
-  "CI-Marketplace/deploy.yml",
   "CI-Docs/deploy-cloudflare.yml",
   "CI-Spatial-Companion-WebXR/pages-deploy.yml",
   "CI-WebXR-Time-Machine/deploy-cloudflare-pages.yml",
