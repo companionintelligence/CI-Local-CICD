@@ -26,6 +26,11 @@ keep = [
   "Companion-Pipe/sdk-release.yml",
   "CI-Applet/release.yml",
   "CI-Browser-Extension/release.yml",
+
+  # Docs PR checks: prettier and internal links on every docs pull request. Not a
+  # ship path, so they cost minutes on each matching PR. Kept live by owner decision
+  # (companionintelligence/CI-Docs#339).
+  "CI-Docs/docs-pr-checks.yml",
 ]
 
 # Gated even if a `keep` pattern would otherwise match. Use this for the
