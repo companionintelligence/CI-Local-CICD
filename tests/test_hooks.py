@@ -19,6 +19,13 @@ from .test_cli import green_policy
 CLI = Path("/opt/ci/ci-local")
 
 
+@pytest.fixture(autouse=True)
+def sealed_git(monkeypatch):
+    """hooks asks git where hooks live; keep this machine's git config out of it."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def repo(tmp_path):
     root = tmp_path / "CI-Server"

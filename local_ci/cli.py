@@ -7,6 +7,7 @@
     ci-local run    [--repo X] [--path P]  run those checks locally
     ci-local hooks install [--apply]       add the pre-push hook
     ci-local hooks uninstall [--apply]     remove it
+    ci-local hooks status                  show whether git will run it
 
 Nothing writes to disk without ``--apply``; every command defaults to a dry run.
 """
@@ -26,6 +27,7 @@ from . import __version__
 from .detect import discover_repos, plan_for, resolve_checkout
 from .hooks import DEFAULT_CHECKS
 from .hooks import install as install_hook
+from .hooks import status as hook_status
 from .hooks import uninstall as uninstall_hook
 from .policy import DEFAULT_POLICY_FILE, Policy, classify
 from .retention import DEFAULT_RETENTION_DAYS, apply_retention
@@ -561,6 +563,8 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     policy = Policy.load(args.policy)
     cli_path = REPO_ROOT / "ci-local"
     checks = args.only.split(",") if args.only else None
+    if args.action == "status":
+        return _hooks_status(args, cli_path, checks)
     pending: Dict[str, int] = defaultdict(int)
     for repo_path in discover_repos(args.workspace, args.repo):
         if args.action == "install":
@@ -585,6 +589,19 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     else:
         counts = ", ".join(f"{n} {action}" for action, n in pending.items())
         print(f"\ndry run: nothing written ({counts}). Re-run with --apply.")
+    return 0
+
+
+def _hooks_status(args: argparse.Namespace, cli_path: Path, checks) -> int:
+    """Where each repo's hook is, and whether git will run it. Reads only."""
+    counts: Dict[str, int] = defaultdict(int)
+    for repo_path in discover_repos(args.workspace, args.repo):
+        result = hook_status(repo_path, cli_path, sys.executable, checks)
+        counts[result.action] += 1
+        print(f"  {result.action:<10}{result.repo}  {result.detail}")
+    order = ["live", "dead", "none", "skipped"]
+    summary = ", ".join(f"{counts[a]} {a}" for a in order if counts[a])
+    print(f"\n{summary or 'no repos matched'}.")
     return 0
 
 
@@ -734,7 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.set_defaults(func=cmd_watch)
 
     hooks_p = add_command(sub, "hooks", help="manage the pre-push hook")
-    hooks_p.add_argument("action", choices=["install", "uninstall"])
+    hooks_p.add_argument("action", choices=["install", "uninstall", "status"])
     hooks_p.add_argument("--apply", action="store_true", help="write changes")
     hooks_p.add_argument(
         "--only",
@@ -742,7 +759,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_p.add_argument(
         "--force", action="store_true",
-        help="back up and replace an existing unmanaged hook",
+        help="back up and replace an existing unmanaged hook in .git/hooks, or "
+             "add the block to a core.hooksPath hook that git would commit",
     )
     hooks_p.set_defaults(func=cmd_hooks)
     return parser

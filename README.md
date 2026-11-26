@@ -53,6 +53,9 @@ Every command is a dry run until you pass `--apply`.
 ./ci-local hooks install
 ./ci-local hooks install --apply
 
+# Which repos git will actually run that hook in
+./ci-local hooks status
+
 # Cap artifact retention — storage is billed wherever the job ran, so
 # gating does nothing for it
 ./ci-local retention --days 7
@@ -258,6 +261,50 @@ Hooks installed before this change still check the main clone until
 whether the hook would be installed, updated or skipped, and writes nothing;
 with it, it rewrites `.git/hooks/pre-push` in every repo it matches, so preview
 first or scope it with `--repo`.
+
+### The hook goes where git looks
+
+When `core.hooksPath` is set (husky's `.husky/_`, a `.githooks` directory),
+git never reads `.git/hooks`, so a hook there is dead and every push goes
+through unchecked. `hooks install` asks git where it looks
+(`git rev-parse --git-path hooks`) and, when that is not `.git/hooks`, puts its
+block between `# >>> ci-local pre-push` and `# <<< ci-local pre-push` at the top
+of that directory's `pre-push`, after the shebang. The rest of the file stays as
+it was and runs after the block. The block refuses the push when its checks
+fail, and otherwise falls through. A ci-local hook left in `.git/hooks` is
+removed in the same step, and `hooks uninstall` takes the block out again.
+
+It will not edit:
+
+- a `core.hooksPath` outside the repo, which may serve every repo on the
+  machine;
+- a hook file that git tracks, or one git would commit because it is not
+  ignored, unless you pass `--force`. The block names local paths and must not
+  reach a commit. husky's `.husky/_` is ignored, so it needs no `--force`;
+- a directory that does not exist yet, a hook that is not executable, or a
+  symlink.
+
+Two limits remain. husky rewrites `.husky/_` on every install of the repo's
+dependencies, which drops the block. And a relative `core.hooksPath` is read
+from the root of the worktree that pushes, so each linked worktree runs its own
+copy, and the block in the main clone does not check their pushes.
+`hooks status` reports both:
+
+```bash
+./ci-local hooks status
+#   live      repo-a  /path/.husky/_/pre-push (current); 3 of 4 linked worktree(s) ...
+#   dead      repo-b  /path/.git/hooks/pre-push is not run: core.hooksPath is .githooks, ...
+#   none      repo-c  no ci-local hook in /path/.git/hooks/pre-push
+```
+
+`live` means git runs the hook (and says whether `hooks install` would rewrite
+it), `dead` means a ci-local hook is installed where git does not look or is not
+executable, and `none` means there is no ci-local hook.
+
+The hook fails closed. If the `ci-local` script or the Python it names is gone,
+the push is refused with a message saying so, where an older hook printed
+"skipping" and let the push through. `SKIP_LOCAL_CI=1` still skips the checks,
+and in a shared hook file the rest of that file still runs.
 
 ### Tests
 
