@@ -7,20 +7,24 @@ deleted by whoever it blocks first. It is not allowed to pass by accident:
 when the ``ci-local`` it names is gone, the push is refused, not waved through.
 
 Where the hook goes depends on ``core.hooksPath``. Without it, git runs
-``.git/hooks/pre-push``, a file ci-local owns outright. With it - husky's
-``.husky/_``, a ``.githooks`` directory - git never looks in ``.git/hooks``, so
-a hook there is dead. ci-local then puts its block, between markers, into the
-``pre-push`` that git does run, and keeps everything else in that file.
+``.git/hooks/pre-push``: ci-local writes that file when there is none, and with
+``--force`` puts its block at the top of one that is already there, such as
+git-lfs's. With it - husky's ``.husky/_``, a ``.githooks`` directory - git
+never looks in ``.git/hooks``, so a hook there is dead. ci-local then puts its
+block, between markers, into the ``pre-push`` that git does run. Either way
+everything else in a shared file is kept, and runs after the block.
 """
 
 from __future__ import annotations
 
+import functools
 import os
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .detect import git_env
 
@@ -31,10 +35,16 @@ SENTINEL = "# managed-by: ci-local"
 # contain SENTINEL, so a shared file is never mistaken for one ci-local owns.
 BLOCK_BEGIN = "# >>> ci-local pre-push"
 BLOCK_END = "# <<< ci-local pre-push"
+# On the BEGIN line when `hooks install` created the file, so that `hooks
+# uninstall` deletes that file, and never one that was there before.
+CREATED = "which created this file"
 
 # What the hook runs unless `hooks install --only` says otherwise. `spec` is the
 # spec slot: every `spec:<id>` check from the repo's `.agent-configs/specs.toml`.
 DEFAULT_CHECKS = ["lint", "typecheck", "test", "spec"]
+
+# The block is sh, so it goes only into a file that a POSIX shell runs.
+SHELLS = ("sh", "bash", "dash", "ksh", "zsh")
 
 # `--repo` precedes the subcommand: it is a global flag, and the whole point of
 # the hook is that it runs *this* repo's checks. Getting that wrong scoped every
@@ -55,7 +65,7 @@ DEFAULT_CHECKS = ["lint", "typecheck", "test", "spec"]
 # runs after it, and it leaves stdin unread: git sends the pushed refs there,
 # and the rest of the file (git-lfs, for one) may need them.
 
-BLOCK_TEMPLATE = """{begin} (written by `ci-local hooks install`; edits are lost)
+BLOCK_TEMPLATE = """{begin} (written by `ci-local hooks install`{created}; edits are lost)
 # Runs this repo's checks locally instead of on billed GitHub-hosted runners.
 # Bypass with SKIP_LOCAL_CI=1 or `git push --no-verify`.
 if [ "${{SKIP_LOCAL_CI:-0}}" = "1" ]; then
@@ -133,6 +143,8 @@ class HookDirs:
     own: Path     # `<git common dir>/hooks`: git's default, shared by every worktree
     active: Path  # the directory git runs hooks from
     configured: str = ""  # core.hooksPath as written, when it moves `active`
+    # The main clone (or bare repository) when `root` is a linked worktree of it.
+    main_clone: Optional[Path] = None
 
     @property
     def redirected(self) -> bool:
@@ -142,6 +154,10 @@ class HookDirs:
     def per_worktree(self) -> bool:
         """A relative core.hooksPath: each worktree resolves it against its own root."""
         return self.redirected and not os.path.isabs(os.path.expanduser(self.configured))
+
+    @property
+    def linked(self) -> bool:
+        return self.main_clone is not None
 
 
 def _git(cwd: Path, *args: str, ceiling: bool = False) -> subprocess.CompletedProcess:
@@ -166,28 +182,65 @@ def hook_dirs(repo_path: Path) -> Optional[HookDirs]:
     """
     root = repo_path.resolve()
     try:
-        proc = _git(root, "rev-parse", "--show-toplevel", "--git-common-dir",
-                    "--git-path", "hooks", ceiling=True)
+        proc = _git(root, "rev-parse", "--show-toplevel", "--git-dir",
+                    "--git-common-dir", "--git-path", "hooks", ceiling=True)
     except OSError:
         proc = None
     lines = proc.stdout.splitlines() if proc is not None and proc.returncode == 0 else []
-    if len(lines) != 3 or Path(lines[0]).resolve() != root:
+    if len(lines) != 4 or Path(lines[0]).resolve() != root:
         gitdir = git_dir(repo_path)
         if gitdir is None:
             return None
         return HookDirs(repo_path, gitdir / "hooks", gitdir / "hooks")
-    own = (root / lines[1] / "hooks").resolve()
-    active = (root / lines[2]).resolve()
+    gitdir = (root / lines[1]).resolve()
+    common = (root / lines[2]).resolve()
+    own = (common / "hooks").resolve()
+    active = (root / lines[3]).resolve()
     configured = ""
     if active != own:
         configured = _git(root, "config", "--get", "core.hooksPath").stdout.strip()
-    return HookDirs(root, own, active, configured)
+    main_clone = None
+    if gitdir != common:
+        main_clone = common.parent if common.name == ".git" else common
+    return HookDirs(root, own, active, configured, main_clone)
 
 
-def render_block(repo: str, cli_path: Path, python: str, checks: List[str]) -> str:
+def _linked(dirs: HookDirs) -> str:
+    # A linked worktree shares the main clone's hooks, and the main clone's
+    # name is the one that keys the policy. Installing from here would rewrite
+    # that shared hook under this folder's name.
+    return f"linked worktree of {dirs.main_clone}; manage the hook from the main clone"
+
+
+def unstable_location(root: Path, temp_dirs: Optional[List[Path]] = None) -> Optional[str]:
+    """Why a hook should not name the ``ci-local`` in checkout ``root``, if so.
+
+    The hook fails closed, so the path it names has to outlive the hook. A
+    linked worktree goes when its branch is done, and a temp directory goes in
+    the next cleanup. After that, every push through the hook is refused.
+    """
+    dirs = hook_dirs(root)
+    if dirs is not None and dirs.linked:
+        return f"{root} is a linked worktree of {dirs.main_clone}"
+    resolved = root.resolve()
+    for temp in temp_dirs if temp_dirs is not None else _temp_dirs():
+        if _within(resolved, temp):
+            return f"{root} is under the temporary directory {temp}"
+    return None
+
+
+def _temp_dirs() -> List[Path]:
+    names = {tempfile.gettempdir(), os.environ.get("TMPDIR") or "", "/tmp", "/var/tmp"}
+    return sorted({Path(name).resolve() for name in names if name})
+
+
+def render_block(
+    repo: str, cli_path: Path, python: str, checks: List[str], created: bool = False,
+) -> str:
     return BLOCK_TEMPLATE.format(
         begin=BLOCK_BEGIN,
         end=BLOCK_END,
+        created=f", {CREATED}" if created else "",
         cli=cli_path,
         python=python,
         repo=repo,
@@ -207,90 +260,101 @@ def install(
     python: str = "python3",
     checks: Optional[List[str]] = None,
     force: bool = False,
+    edit_tracked: bool = False,
     apply: bool = False,
 ) -> HookResult:
-    """Write the hook, backing up anything we did not write ourselves.
+    """Write the hook, or put the block into the hook git already runs.
+
+    ``force`` lets the block into an existing ``.git/hooks/pre-push`` that
+    ci-local did not write. ``edit_tracked`` lets it into a core.hooksPath hook
+    that git tracks or would commit. They are separate because the second puts
+    this machine's paths one commit away from a remote.
 
     The action is decided before anything is touched, so without ``apply`` the
     result is exactly what ``apply`` would report and nothing is written - not
-    the hook, not the backup, not even the hooks dir. ``hooks install`` used to
-    write unconditionally, which rewrote the hook in every workspace repo for
-    anyone who ran it expecting the usual dry run.
+    the hook, not even the hooks dir. ``hooks install`` used to write
+    unconditionally, which rewrote the hook in every workspace repo for anyone
+    who ran it expecting the usual dry run.
     """
     repo = repo_path.name
     dirs = hook_dirs(repo_path)
     if dirs is None:
         return HookResult(repo, "skipped", "not a git repository")
+    if dirs.linked:
+        return HookResult(repo, "skipped", _linked(dirs))
     checks = checks or DEFAULT_CHECKS
+    render = functools.partial(render_block, repo, cli_path, python, checks)
     if dirs.redirected:
-        block = render_block(repo, cli_path, python, checks)
-        return _chain(repo, dirs, block, force, apply)
+        return _chain(repo, dirs, dirs.active / HOOK_NAME, render, edit_tracked, apply)
 
-    hooks_dir = dirs.own
-    hook_path = hooks_dir / HOOK_NAME
-    backup = hooks_dir / f"{HOOK_NAME}.pre-ci-local"
+    hook_path = dirs.own / HOOK_NAME
+    if os.path.lexists(hook_path) and not _owned(hook_path):
+        # Someone else's hook: git-lfs writes one. The block goes at its top and
+        # the rest keeps running. It used to be moved aside, and never ran again.
+        if not force and not _has_block(hook_path):
+            return HookResult(repo, "skipped",
+                              "existing unmanaged hook (use --force to add the "
+                              "ci-local block to the top of it)")
+        return _chain(repo, dirs, hook_path, render, edit_tracked, apply)
+
     body = render_hook(repo, cli_path, python, checks)
-
     action = "installed"
-    displace = False
     if hook_path.exists():
-        existing = hook_path.read_text(encoding="utf-8", errors="replace")
-        if SENTINEL in existing:
-            if existing == body:
-                return HookResult(repo, "skipped", "already current")
-            action = "updated"
-        elif force:
-            if backup.exists():
-                return HookResult(
-                    repo, "skipped", f"backup already exists at {backup}"
-                )
-            action = "updated"
-            displace = True
-        else:
-            return HookResult(
-                repo, "skipped", "existing unmanaged hook (use --force)"
-            )
+        if hook_path.read_text(encoding="utf-8", errors="replace") == body:
+            return HookResult(repo, "skipped", "already current")
+        action = "updated"
 
     result = HookResult(repo, action, str(hook_path))
     if not apply:
         return result
 
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    if displace:
-        hook_path.rename(backup)
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
     hook_path.write_text(body, encoding="utf-8")
     hook_path.chmod(hook_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
     return result
 
 
-def _chain(repo: str, dirs: HookDirs, block: str, force: bool, apply: bool) -> HookResult:
-    """Put the block into the ``pre-push`` that core.hooksPath makes git run."""
-    target = dirs.active / HOOK_NAME
-    problem = _cannot_edit(dirs, target, force)
+def _chain(
+    repo: str,
+    dirs: HookDirs,
+    target: Path,
+    render: Callable[..., str],
+    edit_tracked: bool,
+    apply: bool,
+) -> HookResult:
+    """Put the block at the top of ``target``, keeping the rest of the file."""
+    problem, tracking = _cannot_edit(dirs, target, repo, edit_tracked)
     if problem:
         return HookResult(repo, "skipped", problem)
 
     created = not target.exists()
+    span = None
     if created:
-        text, updated = "", "#!/bin/sh\n" + block
+        text, updated = "", "#!/bin/sh\n" + render(created=True)
     else:
         try:
             text = target.read_text(encoding="utf-8")
-            updated = _with_block(text, block)
+            lines = text.splitlines(keepends=True)
+            span = _find_block(lines)
         except UnicodeDecodeError:
             return HookResult(repo, "skipped", f"{target} is not UTF-8 text; not editing it")
         except ValueError as exc:
             return HookResult(repo, "skipped", f"{target}: {exc}")
+        # A file ci-local created keeps saying so, for `hooks uninstall`.
+        ours = span is not None and CREATED in lines[span[0]]
+        updated = _with_block(lines, span, render(created=ours))
 
     # ci-local's whole-file hook from before core.hooksPath was honoured: git
     # does not run it, so it goes once the block is in place.
-    retire = _owned(dirs.own / HOOK_NAME)
+    retire = dirs.redirected and _owned(dirs.own / HOOK_NAME)
     if updated == text and not retire:
         return HookResult(repo, "skipped", "already current")
 
-    had_block = not created and _find_block(text.splitlines(keepends=True)) is not None
-    action = "updated" if had_block else "installed"
-    detail = [f"{target} (core.hooksPath {dirs.configured})"]
+    action = "updated" if span is not None else "installed"
+    where = f"core.hooksPath {dirs.configured}" if dirs.redirected else "added to the existing hook"
+    detail = [f"{target} ({where})"]
+    if tracking:
+        detail.append(tracking)
     if retire:
         detail.append(f"removes the copy in {dirs.own / HOOK_NAME}, which git does not run")
     if dirs.per_worktree:
@@ -307,31 +371,78 @@ def _chain(repo: str, dirs: HookDirs, block: str, force: bool, apply: bool) -> H
     return result
 
 
-def _cannot_edit(dirs: HookDirs, target: Path, force: bool) -> Optional[str]:
-    """Why ci-local will not put its block into ``target``, if it will not."""
+def _cannot_edit(
+    dirs: HookDirs, target: Path, repo: str, edit_tracked: bool,
+) -> Tuple[Optional[str], str]:
+    """Why ci-local will not put its block into ``target``, or a note on doing so.
+
+    The note is set when ``edit_tracked`` lets the block into a file git tracks
+    or would commit, so that the dry run says so.
+    """
     common = dirs.own.parent
-    if not (_within(dirs.active, dirs.root) or _within(dirs.active, common)):
+    active = target.parent
+    if not (_within(active, dirs.root) or _within(active, common)):
         # A directory outside the repo may serve every repo on the machine; a
         # block naming this repo would then run its checks on every push.
         return (f"core.hooksPath {dirs.configured} is outside this repo and may "
-                f"be shared; not editing it")
-    if not dirs.active.is_dir():
+                f"be shared; not editing it"), ""
+    if not active.is_dir():
         return (f"core.hooksPath {dirs.configured} does not exist, so git runs no "
-                f"pre-push hook here; set the directory up first")
+                f"pre-push hook here; set the directory up first"), ""
     if target.is_symlink():
-        return f"{target} is a symlink; not editing through it"
-    if target.exists() and not os.access(target, os.X_OK):
-        return f"{target} is not executable, so git does not run it"
-    if force or _within(target, common):
-        return None
+        return f"{target} is a symlink; not editing through it", ""
+    if target.exists():
+        if not os.access(target, os.X_OK):
+            return f"{target} is not executable, so git does not run it", ""
+        problem = _interpreter_problem(target)
+        if problem:
+            return problem, ""
+    if _within(target, common):
+        return None, ""  # inside the git dir, which git never tracks
     relative = str(target.relative_to(dirs.root))
     if _git(dirs.root, "ls-files", "--error-unmatch", "--", relative).returncode == 0:
-        return (f"{target} is tracked by git, so the block would show as a local "
-                f"change (use --force)")
-    if _git(dirs.root, "check-ignore", "-q", "--", relative).returncode != 0:
-        return (f"{target} is not ignored by git, so the block could be committed "
-                f"(use --force)")
-    return None
+        refusal = "tracked by git: the block would show as a local change"
+        note = "tracked by git: the block will show as a local change"
+    elif _git(dirs.root, "check-ignore", "-q", "--", relative).returncode != 0:
+        refusal = note = "not ignored by git: the block could be committed"
+    else:
+        return None, ""
+    if not edit_tracked:
+        # The block names this machine's paths, and the repo may be public.
+        return f"{target} is {refusal} (to edit it anyway: --repo {repo} --edit-tracked)", ""
+    return None, note
+
+
+def _interpreter_problem(target: Path) -> Optional[str]:
+    """Why the program on ``target``'s ``#!`` line cannot run the block, if so."""
+    try:
+        with target.open("rb") as handle:
+            first = handle.readline(512)
+    except OSError as exc:
+        return f"{target} cannot be read: {exc.strerror or type(exc).__name__}"
+    if not first.startswith(b"#!"):
+        return None  # git runs a hook without one with sh
+    program = _shebang_program(first[2:].decode("utf-8", errors="replace"))
+    if program in SHELLS:
+        return None
+    return (f"{target} is run by {program or 'an unnamed program'}, not a POSIX shell, "
+            f"and the block is sh; not editing it")
+
+
+def _shebang_program(line: str) -> str:
+    """The program a ``#!`` line runs, looking through ``env``."""
+    words = line.split()
+    if not words:
+        return ""
+    program = os.path.basename(words[0])
+    if program != "env":
+        return program
+    for word in words[1:]:
+        # `env -S bash -e`, `env LC_ALL=C sh`: options and assignments come first.
+        if word.startswith("-") or "=" in word:
+            continue
+        return os.path.basename(word)
+    return ""
 
 
 def _within(path: Path, parent: Path) -> bool:
@@ -354,10 +465,8 @@ def _find_block(lines: List[str]) -> Optional[Tuple[int, int]]:
     return begins[0], ends[0]
 
 
-def _with_block(text: str, block: str) -> str:
-    """``text`` with ci-local's block replaced, or added after the shebang."""
-    lines = text.splitlines(keepends=True)
-    span = _find_block(lines)
+def _with_block(lines: List[str], span: Optional[Tuple[int, int]], block: str) -> str:
+    """``lines`` with ci-local's block at ``span`` replaced, or added after the shebang."""
     if span is not None:
         begin, end = span
         return "".join(lines[:begin]) + block + "".join(lines[end + 1:])
@@ -386,7 +495,7 @@ def _has_block(path: Path) -> bool:
 
 
 def _remove_owned(hooks_dir: Path) -> None:
-    """Delete ci-local's hook and put back any hook it displaced."""
+    """Delete ci-local's hook, and put back a hook an older ci-local moved aside."""
     hook_path = hooks_dir / HOOK_NAME
     backup = hooks_dir / f"{HOOK_NAME}.pre-ci-local"
     hook_path.unlink()
@@ -395,7 +504,7 @@ def _remove_owned(hooks_dir: Path) -> None:
 
 
 def uninstall(repo_path: Path, apply: bool = False) -> HookResult:
-    """Remove our hook and restore any hook we displaced.
+    """Remove our hook or our block, putting back what was there before.
 
     As with :func:`install`, nothing changes on disk without ``apply``.
     """
@@ -403,15 +512,20 @@ def uninstall(repo_path: Path, apply: bool = False) -> HookResult:
     dirs = hook_dirs(repo_path)
     if dirs is None:
         return HookResult(repo, "skipped", "not a git repository")
+    if dirs.linked:
+        return HookResult(repo, "skipped", _linked(dirs))
     if dirs.redirected:
-        return _unchain(repo, dirs, apply)
+        return _unchain(repo, dirs, dirs.active / HOOK_NAME, apply)
 
     hook_path = dirs.own / HOOK_NAME
-    if not hook_path.exists():
+    if not os.path.lexists(hook_path):
         return HookResult(repo, "skipped", "no hook installed")
-    if SENTINEL not in hook_path.read_text(encoding="utf-8", errors="replace"):
+    if not _owned(hook_path):
+        if _has_block(hook_path):
+            return _unchain(repo, dirs, hook_path, apply)
         return HookResult(repo, "skipped", "hook not managed by ci-local")
 
+    # A hook an older ci-local moved aside with --force, which it now restores.
     backup = dirs.own / f"{HOOK_NAME}.pre-ci-local"
     restore = backup.exists()
     result = HookResult(
@@ -424,25 +538,27 @@ def uninstall(repo_path: Path, apply: bool = False) -> HookResult:
     return result
 
 
-def _unchain(repo: str, dirs: HookDirs, apply: bool) -> HookResult:
-    """Take the block out of the core.hooksPath hook, and any dead copy too."""
-    target = dirs.active / HOOK_NAME
+def _unchain(repo: str, dirs: HookDirs, target: Path, apply: bool) -> HookResult:
+    """Take the block out of ``target``, and any dead copy in ``.git/hooks`` too."""
     remaining = None
-    if _has_block(target) and not target.is_symlink():
+    created = False
+    if _has_block(target):
+        if target.is_symlink():
+            return HookResult(repo, "skipped", f"{target} is a symlink; not editing through it")
         try:
             lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
             begin, end = _find_block(lines)
         except (UnicodeDecodeError, ValueError) as exc:
             return HookResult(repo, "skipped", f"{target}: {exc}")
         remaining = "".join(lines[:begin] + lines[end + 1:])
-    retire = _owned(dirs.own / HOOK_NAME)
+        # Deleted only when ci-local created it and nothing has been added since.
+        created = CREATED in lines[begin] and all(
+            line.startswith("#!") or not line.strip() for line in remaining.splitlines()
+        )
+    retire = dirs.redirected and _owned(dirs.own / HOOK_NAME)
     if remaining is None and not retire:
         return HookResult(repo, "skipped", "no hook installed")
 
-    # Nothing but a shebang left means ci-local created the file.
-    created = remaining is not None and all(
-        line.startswith("#!") or not line.strip() for line in remaining.splitlines()
-    )
     detail = []
     if remaining is not None:
         detail.append(f"{target}" + (" (deleted: ci-local created it)" if created else ""))
@@ -478,6 +594,8 @@ def status(
     dirs = hook_dirs(repo_path)
     if dirs is None:
         return HookResult(repo, "skipped", "not a git repository")
+    if dirs.linked:
+        return HookResult(repo, "skipped", _linked(dirs))
     target = dirs.active / HOOK_NAME
     runs = _owned(target) or _has_block(target)
 
@@ -497,8 +615,8 @@ def status(
         return HookResult(repo, "none", f"no ci-local hook in {target}{where}")
 
     # The dry run of `hooks install` says whether a reinstall would change it.
-    # --force only so a tracked hook file is compared rather than refused.
-    fresh = install(repo_path, cli_path, python, checks, force=True)
+    # Both flags only so a file that needs one is compared rather than refused.
+    fresh = install(repo_path, cli_path, python, checks, force=True, edit_tracked=True)
     current = fresh.action == "skipped" and fresh.detail == "already current"
     notes = [f"{target} ({'current' if current else 'hooks install would rewrite it'})"]
     notes += dead + _unreached(dirs)

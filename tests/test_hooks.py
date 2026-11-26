@@ -11,7 +11,9 @@ from pathlib import Path
 import pytest
 
 from local_ci.cli import REPO_ROOT, build_parser
-from local_ci.hooks import HOOK_NAME, SENTINEL, git_dir, install, render_hook, uninstall
+from local_ci.hooks import (
+    BLOCK_BEGIN, BLOCK_END, HOOK_NAME, SENTINEL, git_dir, install, render_hook, uninstall,
+)
 
 from .gitrepo import commit, git, make_checkouts, requires_git
 from .test_cli import green_policy
@@ -35,6 +37,16 @@ def repo(tmp_path):
 
 def hook_file(repo):
     return repo / ".git" / "hooks" / HOOK_NAME
+
+
+def backup_file(repo):
+    return repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local"
+
+
+def executable(path, text):
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 class TestGitDir:
@@ -93,22 +105,47 @@ class TestInstall:
         assert "--force" in result.detail
         assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
 
-    def test_force_backs_up_the_existing_hook(self, repo):
-        hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    def test_force_adds_the_block_to_the_top_of_the_existing_hook(self, repo):
+        """git-lfs's hook, say: it has to keep running, and it used to be moved aside."""
+        mine(repo)
         result = install(repo, CLI, force=True, apply=True)
-        assert result.action == "updated"
-        backup = repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local"
-        assert "echo mine" in backup.read_text(encoding="utf-8")
-        assert SENTINEL in hook_file(repo).read_text(encoding="utf-8")
+        assert result.action == "installed"
+        assert result.detail == f"{hook_file(repo)} (added to the existing hook)"
+        text = hook_file(repo).read_text(encoding="utf-8")
+        assert text.startswith("#!/bin/sh\n" + BLOCK_BEGIN)
+        assert text.endswith(f"{BLOCK_END}\necho mine\n")
+        assert SENTINEL not in text  # still the other hook's file
+        assert not backup_file(repo).exists()
 
-    def test_force_refuses_to_overwrite_an_existing_backup(self, repo):
-        (repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local").write_text(
-            "original\n", encoding="utf-8"
-        )
-        hook_file(repo).write_text("#!/bin/sh\necho second\n", encoding="utf-8")
+    def test_the_added_block_is_kept_current_without_force(self, repo):
+        mine(repo)
+        install(repo, CLI, checks=["test"], force=True, apply=True)
+        assert install(repo, CLI, checks=["test"], apply=True).detail == "already current"
+        assert install(repo, CLI, checks=["lint", "test"], apply=True).action == "updated"
+        text = hook_file(repo).read_text(encoding="utf-8")
+        assert text.count(BLOCK_BEGIN) == 1
+        assert '--only "lint,test"' in text
+        assert text.endswith("echo mine\n")
+
+    def test_force_leaves_a_backup_from_an_older_ci_local_alone(self, repo):
+        backup_file(repo).write_text("original\n", encoding="utf-8")
+        executable(hook_file(repo), "#!/bin/sh\necho second\n")
+        assert install(repo, CLI, force=True, apply=True).action == "installed"
+        assert backup_file(repo).read_text(encoding="utf-8") == "original\n"
+        assert "echo second" in hook_file(repo).read_text(encoding="utf-8")
+
+    def test_force_does_not_put_sh_into_a_python_hook(self, repo):
+        executable(hook_file(repo), "#!/usr/bin/env python3\nprint('mine')\n")
         result = install(repo, CLI, force=True, apply=True)
         assert result.action == "skipped"
-        assert "backup already exists" in result.detail
+        assert "is run by python3, not a POSIX shell" in result.detail
+        assert hook_file(repo).read_text(encoding="utf-8") == "#!/usr/bin/env python3\nprint('mine')\n"
+
+    def test_force_leaves_a_hook_git_does_not_run_alone(self, repo):
+        hook_file(repo).write_text("#!/bin/sh\necho dormant\n", encoding="utf-8")
+        result = install(repo, CLI, force=True, apply=True)
+        assert result.action == "skipped"
+        assert "not executable, so git does not run it" in result.detail
 
     def test_non_repo_is_skipped(self, tmp_path):
         assert install(tmp_path, CLI, apply=True).action == "skipped"
@@ -126,11 +163,18 @@ class TestUninstall:
         assert result.action == "removed"
         assert not hook_file(repo).exists()
 
-    def test_restores_a_backed_up_hook(self, repo):
-        hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    def test_restores_a_hook_an_older_ci_local_moved_aside(self, repo):
+        backed_up(repo)
+        assert uninstall(repo, apply=True).detail == "restored previous hook"
+        assert hook_file(repo).read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+        assert not backup_file(repo).exists()
+
+    def test_takes_the_block_out_of_a_shared_hook(self, repo):
+        mine(repo)
         install(repo, CLI, force=True, apply=True)
-        uninstall(repo, apply=True)
-        assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
+        result = uninstall(repo, apply=True)
+        assert result.action == "removed"
+        assert hook_file(repo).read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
 
     def test_leaves_unmanaged_hooks_alone(self, repo):
         hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
@@ -152,7 +196,7 @@ def tree(root):
 
 
 def mine(repo):
-    hook_file(repo).write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    executable(hook_file(repo), "#!/bin/sh\necho mine\n")
 
 
 def ours(repo, checks=("test",)):
@@ -160,8 +204,15 @@ def ours(repo, checks=("test",)):
 
 
 def backed_up(repo):
+    """What an older ci-local's --force left: its own hook, the other one moved aside."""
     mine(repo)
-    install(repo, CLI, force=True, apply=True)
+    hook_file(repo).rename(backup_file(repo))
+    ours(repo)
+
+
+def chained(repo, checks=("test",)):
+    mine(repo)
+    install(repo, CLI, checks=list(checks), force=True, apply=True)
 
 
 def stale_backup(repo):
@@ -188,12 +239,15 @@ INSTALL_CASES = {
     "unmanaged hook": (mine, {}),
     "unmanaged hook, --force": (mine, {"force": True}),
     "--force, backup exists": (stale_backup, {"force": True}),
+    "block in an unmanaged hook": (chained, {"checks": ["test"]}),
+    "block in an unmanaged hook, new checks": (chained, {"checks": ["lint", "test"]}),
     "not a repo": (not_a_repo, {}),
 }
 
 UNINSTALL_CASES = {
     "our hook": ours,
     "our hook over a backup": backed_up,
+    "block in an unmanaged hook": chained,
     "unmanaged hook": mine,
     "no hook": lambda repo: None,
     "not a repo": not_a_repo,
@@ -233,9 +287,9 @@ class TestDryRun:
 
     def test_force_preview_leaves_the_unmanaged_hook_in_place(self, repo):
         mine(repo)
-        assert install(repo, CLI, force=True).action == "updated"
-        assert "echo mine" in hook_file(repo).read_text(encoding="utf-8")
-        assert not (repo / ".git" / "hooks" / f"{HOOK_NAME}.pre-ci-local").exists()
+        assert install(repo, CLI, force=True).action == "installed"
+        assert hook_file(repo).read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+        assert not backup_file(repo).exists()
 
     def test_uninstall_preview_keeps_our_hook(self, repo):
         ours(repo)

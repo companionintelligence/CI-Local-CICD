@@ -212,7 +212,9 @@ including a repo with no other checks:
 
 - Each entry that has a `check` and is not `planned` becomes a check named
   `spec:<id>`. It runs without a shell from the repo root, or from the entry's
-  `workdir`, and stops after `timeout_seconds` (300 by default).
+  `workdir`, and stops after `timeout_seconds` (300 by default). It runs in a
+  session of its own, so a timeout or Ctrl-C also stops anything it started,
+  such as a model checker's server on a fixed port.
 - An entry with `gate = "required"` fails the run like any other check. An
   `advisory` entry, which every `draft` is, is reported as `WARN` and never
   fails the run, even when its tool is missing.
@@ -221,7 +223,8 @@ including a repo with no other checks:
 - A registry ci-local cannot use is a failure, not a skip. Bad TOML, a missing
   `version`, a duplicate id, a `required` gate on a `draft` entry or a `check`
   written as a string all turn into one failing check named `spec` that names
-  each problem.
+  each problem. `--only spec:<id>` selects that check too, so naming one entry
+  of a broken registry still fails the run.
 
 ci-local checks only the fields it uses: `version`, and each entry's `id`,
 `status`, `gate`, `check`, `workdir` and `timeout_seconds`. CI-Agent-Sync
@@ -262,6 +265,11 @@ whether the hook would be installed, updated or skipped, and writes nothing;
 with it, it rewrites `.git/hooks/pre-push` in every repo it matches, so preview
 first or scope it with `--repo`.
 
+A workspace folder that is a linked worktree is skipped by `hooks install`,
+`hooks uninstall` and `hooks status`, with a note naming its main clone. Its
+pushes run the main clone's hook, and the main clone's name is the one that
+keys `[checks.<repo>]`, so the hook is managed from there.
+
 ### The hook goes where git looks
 
 When `core.hooksPath` is set (husky's `.husky/_`, a `.githooks` directory),
@@ -274,20 +282,40 @@ it was and runs after the block. The block refuses the push when its checks
 fail, and otherwise falls through. A ci-local hook left in `.git/hooks` is
 removed in the same step, and `hooks uninstall` takes the block out again.
 
+Without `core.hooksPath`, an existing `.git/hooks/pre-push` that ci-local did
+not write (git-lfs installs one) is skipped unless you pass `--force`. With
+`--force`, the block goes at the top of that file and the rest keeps running, so
+git-lfs still gets the pushed refs. Older versions moved that hook aside instead, and it
+never ran again; `hooks uninstall` still puts such a hook back. Once a file has
+the block, `hooks install` keeps it current without `--force`. A later
+`git lfs install` then fails with "Hook already exists: pre-push", as it does
+for any pre-push hook it did not write, and `git lfs update --force` would put
+back its own hook without the block.
+
 It will not edit:
 
 - a `core.hooksPath` outside the repo, which may serve every repo on the
   machine;
 - a hook file that git tracks, or one git would commit because it is not
-  ignored, unless you pass `--force`. The block names local paths and must not
-  reach a commit. husky's `.husky/_` is ignored, so it needs no `--force`;
+  ignored, unless you pass `--edit-tracked` together with `--repo`. The block
+  names local paths and must not reach a commit, and `--force` does not reach
+  these files. With `--edit-tracked` the dry run says which files git will show
+  as changed. husky's `.husky/_` is ignored, so it needs neither flag;
+- a hook whose `#!` line runs something other than sh, bash, dash, ksh or zsh,
+  since the block is sh. A file with no `#!` line is fine: git runs it with sh;
 - a directory that does not exist yet, a hook that is not executable, or a
   symlink.
 
+`hooks uninstall` takes the block out and leaves the rest of the file as it
+was. It deletes a file only when `hooks install` created it, which the block's
+first line records, and nothing has been added to it since.
+
 Two limits remain. husky rewrites `.husky/_` on every install of the repo's
-dependencies, which drops the block. And a relative `core.hooksPath` is read
-from the root of the worktree that pushes, so each linked worktree runs its own
-copy, and the block in the main clone does not check their pushes.
+dependencies, which drops the block. ci-local's own install step and checks
+run with `HUSKY=0`, which stops husky from doing that, but an install you run
+yourself still drops it. And a relative `core.hooksPath` is read from the root
+of the worktree that pushes, so each linked worktree runs its own copy, and the
+block in the main clone does not check their pushes.
 `hooks status` reports both:
 
 ```bash
@@ -305,6 +333,12 @@ The hook fails closed. If the `ci-local` script or the Python it names is gone,
 the push is refused with a message saying so, where an older hook printed
 "skipping" and let the push through. `SKIP_LOCAL_CI=1` still skips the checks,
 and in a shared hook file the rest of that file still runs.
+
+So install hooks from a clone of this repo that stays where it is. Every hook
+names the `ci-local` and the Python that ran `hooks install`, and the command
+prints both. `hooks install --apply` refuses when that `ci-local` is in a linked
+worktree or a temp directory, which a cleanup removes, unless you pass
+`--allow-temporary-cli`; the dry run warns.
 
 ### Tests
 

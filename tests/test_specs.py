@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import stat
+import subprocess
 import sys
 import textwrap
+import threading
+import time
 
 import pytest
 
+from local_ci import runner
 from local_ci.cli import describe_check, main
 from local_ci.detect import Check, RepoPlan, plan_for
 from local_ci.docs import render_repo
 from local_ci.policy import RepoOverride
-from local_ci.runner import run_plan, wanted
+from local_ci.runner import run_plan, run_plans, wanted
 from local_ci.specs import REGISTRY_FILE, load
 from local_ci.verify import RemoteWorkflow, RepoAudit
 
@@ -316,6 +322,93 @@ class TestGates:
         assert "1/1 repos passed" in out
 
 
+def alive(pid):
+    """Whether ``pid`` is running; a zombie waiting to be reaped is not."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="needs process groups")
+class TestChildProcesses:
+    """A spec check's own children stop with it, on a timeout and on Ctrl-C.
+
+    A tool such as `quint verify` starts a server on a fixed port; one left
+    running breaks the next run on that port.
+    """
+
+    @pytest.fixture
+    def child(self, tmp_path):
+        """A check that starts a long-lived child, and the file its pid goes to."""
+        pidfile = tmp_path / "child.pid"
+        code = ("import subprocess, sys, time; "
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                f"open({str(pidfile)!r}, 'w').write(str(child.pid)); time.sleep(60)")
+        yield pidfile, toml_argv(code)
+        runner._STOPPING.clear()
+        if pidfile.exists():  # so that a failing test leaves nothing behind
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+    @staticmethod
+    def gone(pid, wait=5.0):
+        deadline = time.monotonic() + wait
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not alive(pid)
+
+    @staticmethod
+    def once_running(pidfile, action):
+        def wait_then_act():
+            deadline = time.monotonic() + 20
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.2)  # the pid is written; let the write finish
+            action()
+        threading.Thread(target=wait_then_act, daemon=True).start()
+
+    def test_a_timeout_stops_the_checks_children(self, tmp_path, child):
+        pidfile, check = child
+        root = repo_with(tmp_path, entry("server", gate="required", check=check,
+                                         extra="timeout_seconds = 3\n"))
+        started = time.monotonic()
+        result = run_plan(plan_for("Demo", root))
+        assert time.monotonic() - started < 20  # not the 60 s the check would take
+        assert result.checks[0].status == "timeout"
+        assert self.gone(int(pidfile.read_text()))
+
+    def test_an_interrupt_stops_them_and_starts_nothing_more(self, tmp_path, child):
+        pidfile, check = child
+        root = repo_with(tmp_path, entry("server", check=check), entry("next", check=PASS))
+        self.once_running(pidfile, runner._interrupt)
+        started = time.monotonic()
+        result = run_plan(plan_for("Demo", root))
+        assert time.monotonic() - started < 20
+        assert [c.name for c in result.checks] == ["spec:server"]
+        assert self.gone(int(pidfile.read_text()))
+
+    @pytest.mark.skipif(signal.getsignal(signal.SIGINT) is not signal.default_int_handler,
+                        reason="needs Python's own SIGINT handler")
+    @pytest.mark.parametrize("jobs", [1, 2])
+    def test_ctrl_c_does_not_wait_for_them(self, tmp_path, child, jobs):
+        """With jobs > 1 (the pre-push hook's run), Ctrl-C lands in the main
+        thread while a worker waits on the check."""
+        pidfile, check = child
+        root = repo_with(tmp_path, entry("server", check=check))
+        self.once_running(pidfile, lambda: os.kill(os.getpid(), signal.SIGINT))
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            run_plans([plan_for("Demo", root)], jobs=jobs)
+        assert time.monotonic() - started < 20
+        assert self.gone(int(pidfile.read_text()))
+
+
 class TestWhereSpecsRun:
     def test_from_the_repo_root_by_default(self, tmp_path):
         root = repo_with(tmp_path, entry(check=toml_argv(
@@ -328,8 +421,17 @@ class TestWhereSpecsRun:
         (root / "backend").mkdir()
         plan = plan_for("Demo", root, RepoOverride(workdir="backend"))
         assert plan.path == root / "backend"
-        assert describe_check(plan.checks[0], plan).endswith("  (in ..)")
+        # Shown from the repo root, where it runs: not as `in ..`.
+        assert describe_check(plan.checks[0], plan) == plan.checks[0].display
         assert run_plan(plan).checks[0].status == "pass"
+
+    def test_an_entry_workdir_is_shown_from_the_repo_root(self, tmp_path):
+        root = repo_with(tmp_path, entry(gate="required", extra='workdir = "tools"\n'))
+        (root / "backend").mkdir()
+        plan = plan_for("Demo", root, RepoOverride(workdir="backend"))
+        assert describe_check(plan.checks[0], plan).endswith("  (in tools)")
+        audit = RepoAudit("Demo", "main", workflows=[])
+        assert "- `spec:demo` (required, in `tools`): " in "\n".join(render_repo(audit, plan, "Demo"))
 
     def test_from_the_entry_workdir(self, tmp_path):
         root = repo_with(tmp_path, entry(gate="required", extra='workdir = "tools"\n',
@@ -389,6 +491,21 @@ class TestOnlySpec:
         assert wanted("spec", ["spec"])
         assert not wanted("spec", ["lint"])
         assert not wanted("specs", ["spec"])
+
+    def test_a_spec_id_selects_the_invalid_registry_check_too(self):
+        """Else `--only spec:<id>` on a broken registry selects nothing, and passes."""
+        assert wanted("spec", ["spec:ledger"])
+        assert wanted("spec", ["lint", "spec:ledger"])
+        assert not wanted("spec:other", ["spec:ledger"])
+
+    def test_a_spec_id_on_an_invalid_registry_fails_the_run(self, tmp_path, capsys):
+        root = repo_with(tmp_path / "ws", entry("ledger", status="draft", gate="required"))
+        (root / ".git").mkdir()
+        code = main(["--workspace", str(tmp_path / "ws"), "--policy", str(tmp_path / "none.toml"),
+                     "run", "--only", "spec:ledger", "--quiet", "--jobs", "1"])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "FAIL spec" in out and "is invalid" in out
 
     def test_on_the_command_line(self, tmp_path, capsys):
         root = repo_with(tmp_path / "ws", entry("a"), entry("b", gate="required"))

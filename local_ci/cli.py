@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import __version__
 from .detect import discover_repos, plan_for, resolve_checkout
-from .hooks import DEFAULT_CHECKS
+from .hooks import DEFAULT_CHECKS, unstable_location
 from .hooks import install as install_hook
 from .hooks import status as hook_status
 from .hooks import uninstall as uninstall_hook
@@ -249,7 +249,7 @@ def describe_check(check, plan) -> str:
         flags.append("advisory")
     elif not check.required:
         flags.append("optional")
-    where = check.runs_in(plan.path)
+    where = check.runs_in(plan.checkout)
     if where:
         flags.append(f"in {where}")
     return check.display + (f"  ({', '.join(flags)})" if flags else "")
@@ -565,6 +565,22 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     checks = args.only.split(",") if args.only else None
     if args.action == "status":
         return _hooks_status(args, cli_path, checks)
+    if args.action == "install":
+        if args.edit_tracked and not args.repo:
+            # One fleet-wide run would put this machine's paths into a tracked
+            # file in every repo that has one, a commit away from its remote.
+            raise SystemExit("ci-local: --edit-tracked edits files git tracks; "
+                             "name each repo with --repo")
+        # The hook refuses every push once the ci-local it names is gone, so it
+        # must not name one that a cleanup will remove.
+        problem = unstable_location(REPO_ROOT)
+        if problem and not args.allow_temporary_cli:
+            message = (f"{problem}. A hook that names this ci-local refuses every "
+                       f"push once it is removed. Install from a clone that stays, "
+                       f"or pass --allow-temporary-cli.")
+            if args.apply:
+                raise SystemExit(f"ci-local: not installing: {message}")
+            print(f"warning: --apply will refuse: {message}\n", file=sys.stderr)
     pending: Dict[str, int] = defaultdict(int)
     for repo_path in discover_repos(args.workspace, args.repo):
         if args.action == "install":
@@ -574,7 +590,7 @@ def cmd_hooks(args: argparse.Namespace) -> int:
                 continue
             result = install_hook(
                 repo_path, cli_path, sys.executable, checks,
-                force=args.force, apply=args.apply,
+                force=args.force, edit_tracked=args.edit_tracked, apply=args.apply,
             )
         else:
             result = uninstall_hook(repo_path, apply=args.apply)
@@ -582,13 +598,18 @@ def cmd_hooks(args: argparse.Namespace) -> int:
             pending[result.action] += 1
         print(f"  {result.action:<10}{result.repo}  {result.detail}")
 
-    if args.apply:
-        return 0
-    if not pending:
-        print("\ndry run: no hooks to change.")
-    else:
-        counts = ", ".join(f"{n} {action}" for action, n in pending.items())
-        print(f"\ndry run: nothing written ({counts}). Re-run with --apply.")
+    summary = []
+    if args.action == "install":
+        # Every hook written names these two paths, and stops working without them.
+        summary.append(f"hooks run: {sys.executable} {cli_path}")
+    if not args.apply:
+        if not pending:
+            summary.append("dry run: no hooks to change.")
+        else:
+            counts = ", ".join(f"{n} {action}" for action, n in pending.items())
+            summary.append(f"dry run: nothing written ({counts}). Re-run with --apply.")
+    if summary:
+        print("\n" + "\n".join(summary))
     return 0
 
 
@@ -759,8 +780,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hooks_p.add_argument(
         "--force", action="store_true",
-        help="back up and replace an existing unmanaged hook in .git/hooks, or "
-             "add the block to a core.hooksPath hook that git would commit",
+        help="add the block to the top of a .git/hooks/pre-push that ci-local "
+             "did not write (git-lfs's, say); the rest of it keeps running",
+    )
+    hooks_p.add_argument(
+        "--edit-tracked", action="store_true",
+        help="add the block to a core.hooksPath hook that git tracks or would "
+             "commit; needs --repo",
+    )
+    hooks_p.add_argument(
+        "--allow-temporary-cli", action="store_true",
+        help="install even when this ci-local is in a linked worktree or a "
+             "temp directory, which a cleanup may remove",
     )
     hooks_p.set_defaults(func=cmd_hooks)
     return parser

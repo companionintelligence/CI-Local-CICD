@@ -81,6 +81,15 @@ class TestRunCheck:
         code = "import os,sys; sys.exit(0 if os.environ.get('CI')=='true' else 1)"
         assert run_check(Check("test", py(code)), plan, 30).status == "pass"
 
+    def test_husky_does_not_reinstall_during_a_run(self, tmp_path, monkeypatch):
+        """husky's `prepare` script rewrites `.husky/_`, and drops the hook's block."""
+        monkeypatch.setenv("HUSKY", "1")
+        plan = make_plan(tmp_path, [])
+        code = "import os,sys; sys.exit(0 if os.environ.get('HUSKY')=='0' else 1)"
+        install = Check("install", py(code))
+        assert run_check(install, plan, 30).status == "pass"
+        assert run_check(Check("test", py(code)), plan, 30).status == "pass"
+
     def test_hook_git_dir_does_not_reach_the_check(self, tmp_path, monkeypatch):
         """A worktree push exports ``GIT_DIR`` to the hook.
 
