@@ -352,7 +352,19 @@ def nested_checkouts(path: Path, limit: int = 200) -> List[str]:
 
 
 def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
-    return _warn_nested(_plan_for(repo, path, override))
+    plan = _plan_for(repo, path, override)
+    extra = getattr(override, "extra", None) if override is not None else None
+    if extra and not override.skip:
+        plan.checks.extend(
+            Check(
+                str(c.get("name", "check")),
+                list(c.get("run", [])),
+                required=bool(c.get("required", True)),
+            )
+            for c in extra
+        )
+        plan.notes.append(f"{len(extra)} check(s) added by policy")
+    return _warn_nested(plan)
 
 
 def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:

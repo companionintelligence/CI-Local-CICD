@@ -16,8 +16,10 @@
 keep = [
   # Deploy on merge. Breaking these means merged code silently never ships.
   "CI-Portal/deploy.yml",
-  "CI-Spatial-Companion-WebXR/pages-deploy.yml",
-  "CI-WebXR-Time-Machine/deploy-cloudflare-pages.yml",
+  # These two name the clone folders, which changed in November 2026: the old
+  # names (CI-Spatial-Companion-WebXR, CI-WebXR-Time-Machine) matched nothing.
+  "Companion-Avatar/pages-deploy.yml",
+  "Companion-Compass/deploy-cloudflare-pages.yml",
 
   # Tag-triggered releases and package publishing.
   "CI-Hub/publish-package-managers.yml",
@@ -43,7 +45,9 @@ force_gate = [
 # Local clone directory -> GitHub repository name. A rename on GitHub does not
 # rename the clone, and the usage report only knows the GitHub name, so without
 # these the audit reports $0 for a repo that is in fact costing money.
-aliases = { CI-Applet = "CI-Capture" }
+# The spatial repos were renamed on GitHub in November 2026, most to lowercase;
+# their clone folders kept the older names.
+aliases = { CI-Applet = "CI-Capture", Companion-Avatar = "companion-avatar", Companion-Compass = "companion-compass", CI-Spatial-Agent-Unity = "companion-agent-unity", CI-Spatial-Unity = "companion-scan-unity" }
 
 # Clone directories ignored entirely. CI-Gateway was deleted from the org; the
 # local clone's origin still points at the dead URL, so every fetch fails.
@@ -52,9 +56,19 @@ exclude = ["CI-Gateway"]
 # Per-repo corrections for layouts the detector cannot read off disk.
 #
 #   workdir  = subdirectory the real project lives in
-#   commands = replace the detected checks entirely
+#   commands = replace the detected checks entirely, install step included
+#   extra    = add checks after the detected ones, keeping the install step
 #   skip     = exclude from `run` and `hooks install`
 [checks.CI-Import-Tools]
 # The root manifest is a decoy: vitest must run from backend/, and a root-level
 # run resolves the wrong workspace.
 workdir = "backend"
+
+[checks.Companion-Compass]
+# The detected set (lint, typecheck, test, build) leaves out two gates the repo's
+# own `npm run ci` runs: the bundle budget, which reads the build, and the
+# end-to-end suite. Its unit tests need Node 22.23 or newer (.nvmrc says 24).
+extra = [
+  { name = "bundle", run = ["bash", "scripts/assert-bundle-gate.sh"] },
+  { name = "e2e", run = ["npm", "run", "--silent", "test:e2e"] },
+]

@@ -417,6 +417,38 @@ class TestOverrides:
         assert plan.stack == "custom"
         assert plan.checks[0].argv == ["make", "check"]
 
+    def test_extra_checks_follow_detection_and_keep_install(self, tmp_path):
+        from local_ci.policy import RepoOverride
+
+        root = make_node_repo(
+            tmp_path, {"lint": "eslint .", "test": "vitest", "build": "vite build"},
+            lockfile="package-lock.json",
+        )
+        override = RepoOverride(
+            extra=[
+                {"name": "bundle", "run": ["bash", "scripts/assert-bundle-gate.sh"]},
+                {"name": "e2e", "run": ["npm", "run", "--silent", "test:e2e"], "required": False},
+            ]
+        )
+        plan = plan_for("repo", root, override)
+        assert plan.stack == "node"
+        assert plan.install is not None
+        assert [c.name for c in plan.checks] == ["lint", "test", "build", "bundle", "e2e"]
+        assert plan.checks[-2].argv == ["bash", "scripts/assert-bundle-gate.sh"]
+        assert plan.checks[-1].required is False
+        assert any("2 check(s) added by policy" in n for n in plan.notes)
+
+    def test_extra_checks_load_from_policy(self, tmp_path):
+        from local_ci.policy import Policy
+
+        path = tmp_path / "ci-local.toml"
+        path.write_text(
+            '[checks.Repo]\nextra = [{ name = "e2e", run = ["npm", "run", "test:e2e"] }]\n',
+            encoding="utf-8",
+        )
+        policy = Policy.load(path)
+        assert policy.checks["Repo"].extra == [{"name": "e2e", "run": ["npm", "run", "test:e2e"]}]
+
     def test_skip_excludes_the_repo(self, tmp_path):
         from local_ci.policy import RepoOverride
 
