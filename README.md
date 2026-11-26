@@ -223,7 +223,8 @@ including a repo with no other checks:
 - A registry ci-local cannot use is a failure, not a skip. Bad TOML, a missing
   `version`, a duplicate id, a `required` gate on a `draft` entry or a `check`
   written as a string all turn into one failing check named `spec` that names
-  each problem.
+  each problem. `--only spec:<id>` selects that check too, so naming one entry
+  of a broken registry still fails the run.
 
 ci-local checks only the fields it uses: `version`, and each entry's `id`,
 `status`, `gate`, `check`, `workdir` and `timeout_seconds`. CI-Agent-Sync

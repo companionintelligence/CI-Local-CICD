@@ -421,8 +421,17 @@ class TestWhereSpecsRun:
         (root / "backend").mkdir()
         plan = plan_for("Demo", root, RepoOverride(workdir="backend"))
         assert plan.path == root / "backend"
-        assert describe_check(plan.checks[0], plan).endswith("  (in ..)")
+        # Shown from the repo root, where it runs: not as `in ..`.
+        assert describe_check(plan.checks[0], plan) == plan.checks[0].display
         assert run_plan(plan).checks[0].status == "pass"
+
+    def test_an_entry_workdir_is_shown_from_the_repo_root(self, tmp_path):
+        root = repo_with(tmp_path, entry(gate="required", extra='workdir = "tools"\n'))
+        (root / "backend").mkdir()
+        plan = plan_for("Demo", root, RepoOverride(workdir="backend"))
+        assert describe_check(plan.checks[0], plan).endswith("  (in tools)")
+        audit = RepoAudit("Demo", "main", workflows=[])
+        assert "- `spec:demo` (required, in `tools`): " in "\n".join(render_repo(audit, plan, "Demo"))
 
     def test_from_the_entry_workdir(self, tmp_path):
         root = repo_with(tmp_path, entry(gate="required", extra='workdir = "tools"\n',
@@ -482,6 +491,21 @@ class TestOnlySpec:
         assert wanted("spec", ["spec"])
         assert not wanted("spec", ["lint"])
         assert not wanted("specs", ["spec"])
+
+    def test_a_spec_id_selects_the_invalid_registry_check_too(self):
+        """Else `--only spec:<id>` on a broken registry selects nothing, and passes."""
+        assert wanted("spec", ["spec:ledger"])
+        assert wanted("spec", ["lint", "spec:ledger"])
+        assert not wanted("spec:other", ["spec:ledger"])
+
+    def test_a_spec_id_on_an_invalid_registry_fails_the_run(self, tmp_path, capsys):
+        root = repo_with(tmp_path / "ws", entry("ledger", status="draft", gate="required"))
+        (root / ".git").mkdir()
+        code = main(["--workspace", str(tmp_path / "ws"), "--policy", str(tmp_path / "none.toml"),
+                     "run", "--only", "spec:ledger", "--quiet", "--jobs", "1"])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "FAIL spec" in out and "is invalid" in out
 
     def test_on_the_command_line(self, tmp_path, capsys):
         root = repo_with(tmp_path / "ws", entry("a"), entry("b", gate="required"))

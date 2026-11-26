@@ -120,7 +120,7 @@ def _spec_section(plan: Optional[RepoPlan]) -> List[str]:
             lines.append(f"- `{check.name}` fails without running: {check.error}")
             continue
         gate = "advisory" if check.advisory else "required"
-        where = check.runs_in(plan.path)
+        where = check.runs_in(plan.checkout)
         place = f", in `{where}`" if where else ""
         lines.append(f"- `{check.name}` ({gate}{place}): `{check.display}`")
     return lines + [""]

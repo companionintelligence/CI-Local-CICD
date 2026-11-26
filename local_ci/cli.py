@@ -249,7 +249,7 @@ def describe_check(check, plan) -> str:
         flags.append("advisory")
     elif not check.required:
         flags.append("optional")
-    where = check.runs_in(plan.path)
+    where = check.runs_in(plan.checkout)
     if where:
         flags.append(f"in {where}")
     return check.display + (f"  ({', '.join(flags)})" if flags else "")

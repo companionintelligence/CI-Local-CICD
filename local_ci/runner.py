@@ -232,12 +232,16 @@ def _interrupt() -> None:
 def wanted(name: str, only: Optional[List[str]]) -> bool:
     """Whether ``--only`` selects a check.
 
-    Names match exactly - ``test`` is not ``test:<package>`` - except ``spec``,
-    which selects the whole spec slot.
+    Names match exactly - ``test`` is not ``test:<package>`` - except in the
+    spec slot. ``spec`` selects every ``spec:*`` check, and any ``spec:<id>``
+    also selects ``spec``, the check an invalid registry becomes, so that a
+    broken registry fails the run rather than leaving nothing selected.
     """
     if not only:
         return True
-    return name in only or (SLOT in only and in_slot(name))
+    if name in only or (SLOT in only and in_slot(name)):
+        return True
+    return name == SLOT and any(in_slot(selector) for selector in only)
 
 
 def run_plan(

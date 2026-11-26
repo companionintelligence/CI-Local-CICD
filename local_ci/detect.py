@@ -82,10 +82,17 @@ class RepoPlan:
     notes: List[str] = field(default_factory=list)
     # Nested checkouts found inside the repo; results are unreliable if set.
     contaminated: List[str] = field(default_factory=list)
+    # The checkout root, when a policy `workdir` puts `path` below it. Spec
+    # checks run from the root, so where they run is shown relative to it.
+    root: Optional[Path] = None
 
     @property
     def runnable(self) -> bool:
         return bool(self.checks)
+
+    @property
+    def checkout(self) -> Path:
+        return self.root or self.path
 
 
 def _read_json(path: Path) -> Dict:
@@ -392,6 +399,7 @@ def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
     recognised stack still gets its spec checks; one the policy skips does not.
     """
     plan = _detect(repo, path, override)
+    plan.root = path
     if plan.stack != "skipped":
         # Imported here: specs builds its checks from Check, defined above.
         from .specs import add_spec_checks
