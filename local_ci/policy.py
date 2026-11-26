@@ -94,11 +94,14 @@ class RepoOverride:
 
     ``workdir`` handles repos whose real project lives in a subdirectory - the
     root manifest is a decoy, and running there produces confident nonsense.
-    ``commands`` replaces the detected set outright.
+    ``commands`` replaces the detected set outright, install step included.
+    ``extra`` appends checks after the detected ones and keeps the detected
+    install step, for a repo whose own CI runs more than its npm scripts show.
     """
 
     workdir: Optional[str] = None
     commands: List[Dict[str, object]] = field(default_factory=list)
+    extra: List[Dict[str, object]] = field(default_factory=list)
     skip: bool = False
 
     @classmethod
@@ -106,6 +109,7 @@ class RepoOverride:
         return cls(
             workdir=data.get("workdir"),
             commands=list(data.get("commands", [])),
+            extra=list(data.get("extra", [])),
             skip=bool(data.get("skip", False)),
         )
 
