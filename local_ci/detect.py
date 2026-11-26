@@ -48,10 +48,27 @@ class Check:
     name: str
     argv: List[str]
     required: bool = True
+    # A failure is reported as a warning and never fails the repo. The spec
+    # slot's advisory entries use it; `required=False` alone still fails.
+    advisory: bool = False
+    # Where to run, when not the plan's own directory, and a time limit that
+    # applies when it is shorter than the run's.
+    cwd: Optional[Path] = None
+    timeout: Optional[int] = None
+    # Why the check could not be built. It then fails with this reason and
+    # runs nothing.
+    error: str = ""
 
     @property
     def display(self) -> str:
         return " ".join(self.argv)
+
+    def runs_in(self, base: Optional[Path]) -> Optional[str]:
+        """Where this runs relative to ``base``, or None when it runs there."""
+        if self.cwd is None or base is None:
+            return None
+        where = os.path.relpath(self.cwd, base)
+        return None if where == "." else where
 
 
 @dataclass
@@ -356,6 +373,22 @@ def plan_for(repo: str, path: Path, override=None) -> RepoPlan:
 
 
 def _plan_for(repo: str, path: Path, override=None) -> RepoPlan:
+    """The detected checks, then one check per entry in the spec registry.
+
+    ``path`` is the checkout root, which is where the registry lives even when
+    a policy ``workdir`` moves detection into a subdirectory. A repo with no
+    recognised stack still gets its spec checks; one the policy skips does not.
+    """
+    plan = _detect(repo, path, override)
+    if plan.stack != "skipped":
+        # Imported here: specs builds its checks from Check, defined above.
+        from .specs import add_spec_checks
+
+        add_spec_checks(plan, path)
+    return plan
+
+
+def _detect(repo: str, path: Path, override=None) -> RepoPlan:
     """Build the local check plan for a single repo.
 
     ``override`` is a :class:`local_ci.policy.RepoOverride`, applied before

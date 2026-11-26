@@ -200,6 +200,39 @@ the lockfile doesn't describe, and nothing in the output says so. Every install
 command is lockfile-frozen (`npm ci`, `--frozen-lockfile`, `--immutable`), so
 reinstalling on a false positive costs time and nothing else.
 
+### Spec checks
+
+A repo that keeps formal or executable specifications lists them in
+`.agent-configs/specs.toml`, a registry whose format CI-Agent-Sync owns. `plan`
+and `run` read it from the root of the checkout they check, for every stack,
+including a repo with no other checks:
+
+- Each entry that has a `check` and is not `planned` becomes a check named
+  `spec:<id>`. It runs without a shell from the repo root, or from the entry's
+  `workdir`, and stops after `timeout_seconds` (300 by default).
+- An entry with `gate = "required"` fails the run like any other check. An
+  `advisory` entry, which every `draft` is, is reported as `WARN` and never
+  fails the run, even when its tool is missing.
+- `--only spec` selects every `spec:*` check. Other names in `--only` still
+  match exactly: `--only test` does not select `test:<package>`.
+- A registry ci-local cannot use is a failure, not a skip. Bad TOML, a missing
+  `version`, a duplicate id, a `required` gate on a `draft` entry or a `check`
+  written as a string all turn into one failing check named `spec` that names
+  each problem.
+
+ci-local checks only the fields it uses: `version`, and each entry's `id`,
+`status`, `gate`, `check`, `workdir` and `timeout_seconds`. CI-Agent-Sync
+validates the rest of the format.
+
+```bash
+./ci-local plan --repo CI-Agent-Sync              # spec:<id> checks after lint and test
+./ci-local run --repo CI-Agent-Sync --only spec   # only the spec checks
+```
+
+The pre-push hook runs `--only lint,typecheck,test,spec` unless
+`hooks install --only` says otherwise, and `ci-local docs` lists each repo's
+spec checks with their gate.
+
 ### The pre-push hook checks the tree being pushed
 
 A repo's hooks live in the git dir that all its worktrees share, so the same

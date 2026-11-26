@@ -283,6 +283,12 @@ def test_failure_hint_is_a_command_that_parses():
     assert args.path == Path("$REPO_PATH")
 
 
+def test_default_hook_runs_the_spec_slot(repo):
+    install(repo, CLI, apply=True)
+    argv = ci_local_argv(hook_file(repo).read_text(encoding="utf-8"))
+    assert build_parser().parse_args(argv).only == "lint,typecheck,test,spec"
+
+
 @requires_git
 class TestWorktreePush:
     """A real ``git push`` through the installed hook, from a real worktree.

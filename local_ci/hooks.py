@@ -16,6 +16,10 @@ from typing import List, Optional
 HOOK_NAME = "pre-push"
 SENTINEL = "# managed-by: ci-local"
 
+# What the hook runs unless `hooks install --only` says otherwise. `spec` is the
+# spec slot: every `spec:<id>` check from the repo's `.agent-configs/specs.toml`.
+DEFAULT_CHECKS = ["lint", "typecheck", "test", "spec"]
+
 # `--repo` precedes the subcommand: it is a global flag, and the whole point of
 # the hook is that it runs *this* repo's checks. Getting that wrong scoped every
 # push to all 33 workspace repos - 37 minutes of unrelated, mostly-red output
@@ -123,7 +127,7 @@ def install(
     hooks_dir = gitdir / "hooks"
     hook_path = hooks_dir / HOOK_NAME
     backup = hooks_dir / f"{HOOK_NAME}.pre-ci-local"
-    body = render_hook(repo, cli_path, python, checks or ["lint", "typecheck", "test"])
+    body = render_hook(repo, cli_path, python, checks or DEFAULT_CHECKS)
 
     action = "installed"
     displace = False
