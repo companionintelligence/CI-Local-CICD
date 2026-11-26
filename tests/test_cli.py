@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from local_ci import cli
 from local_ci.cli import build_parser, load_usage, main, workflow_files
 
 from .gitrepo import make_checkouts, requires_git
@@ -250,6 +251,13 @@ class TestRunAtPath:
 
 
 class TestHooksCommand:
+    @pytest.fixture(autouse=True)
+    def stable_cli(self, monkeypatch):
+        """The suite may run from a linked worktree or a temp dir, where `hooks
+        install --apply` refuses to write hooks that name it; the refusal itself
+        is tested in test_hook_reach.TestInstallLocation."""
+        monkeypatch.setattr(cli, "unstable_location", lambda root: None)
+
     @pytest.fixture
     def repo(self, tmp_path):
         repo = tmp_path / "CI-Server"
@@ -286,6 +294,8 @@ class TestHooksCommand:
         assert "installed CI-Server" in out
         assert str(repo / ".git" / "hooks" / "pre-push") in out
         assert "dry run: nothing written (1 installed). Re-run with --apply." in out
+        # Once, not per hook: the two paths every hook depends on.
+        assert out.count(f"hooks run: {sys.executable} {cli.REPO_ROOT / 'ci-local'}") == 1
 
     def test_uninstall_is_a_dry_run_without_apply(
         self, tmp_path, policy_file, repo, capsys
