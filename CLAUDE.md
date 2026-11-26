@@ -32,7 +32,7 @@ pip install pytest pyyaml
 # no dev server — it's a CLI you invoke directly, not a service
 
 # Run tests (gated by .github/workflows/pr-gate.yml)
-python3 -m pytest -q            # from repo root; 483 tests, 20-70s on a loaded dev Mac (2026-09-27)
+python3 -m pytest -q            # from repo root; 684 tests, 40-50s on a dev Mac (2026-11-26)
 
 # Build for production
 # no build step — nothing is compiled or bundled

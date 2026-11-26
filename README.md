@@ -283,9 +283,9 @@ fail, and otherwise falls through. A ci-local hook left in `.git/hooks` is
 removed in the same step, and `hooks uninstall` takes the block out again.
 
 Without `core.hooksPath`, an existing `.git/hooks/pre-push` that ci-local did
-not write (git-lfs installs one) is skipped unless you pass `--force`. With it,
-the block goes at the top of that file and the rest keeps running, so git-lfs
-still gets the pushed refs. Older versions moved that hook aside instead, and it
+not write (git-lfs installs one) is skipped unless you pass `--force`. With
+`--force`, the block goes at the top of that file and the rest keeps running, so
+git-lfs still gets the pushed refs. Older versions moved that hook aside instead, and it
 never ran again; `hooks uninstall` still puts such a hook back. Once a file has
 the block, `hooks install` keeps it current without `--force`. A later
 `git lfs install` then fails with "Hook already exists: pre-push", as it does
@@ -313,9 +313,9 @@ first line records, and nothing has been added to it since.
 Two limits remain. husky rewrites `.husky/_` on every install of the repo's
 dependencies, which drops the block. ci-local's own install step and checks
 run with `HUSKY=0`, which stops husky from doing that, but an install you run
-yourself still drops it. And a relative `core.hooksPath` is read
-from the root of the worktree that pushes, so each linked worktree runs its own
-copy, and the block in the main clone does not check their pushes.
+yourself still drops it. And a relative `core.hooksPath` is read from the root
+of the worktree that pushes, so each linked worktree runs its own copy, and the
+block in the main clone does not check their pushes.
 `hooks status` reports both:
 
 ```bash
