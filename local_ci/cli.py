@@ -7,6 +7,7 @@
     ci-local run    [--repo X] [--path P]  run those checks locally
     ci-local hooks install [--apply]       add the pre-push hook
     ci-local hooks uninstall [--apply]     remove it
+    ci-local hooks status                  show whether git will run it
 
 Nothing writes to disk without ``--apply``; every command defaults to a dry run.
 """
@@ -24,7 +25,9 @@ from typing import Dict, List, Optional, Tuple
 
 from . import __version__
 from .detect import discover_repos, plan_for, resolve_checkout
+from .hooks import DEFAULT_CHECKS
 from .hooks import install as install_hook
+from .hooks import status as hook_status
 from .hooks import uninstall as uninstall_hook
 from .policy import DEFAULT_POLICY_FILE, Policy, classify
 from .retention import DEFAULT_RETENTION_DAYS, apply_retention
@@ -52,6 +55,7 @@ STATUS_MARK = {
     "fail": "FAIL",
     "skip": "skip",
     "timeout": "TIME",
+    "warn": "WARN",
     "empty": "----",
 }
 
@@ -236,6 +240,21 @@ def _checkout_plan(path: Path, names: Optional[List[str]], policy: Policy):
     return plan_for(repo, checkout.path, policy.override_for(repo))
 
 
+def describe_check(check, plan) -> str:
+    """The command a check runs, with how it gates and where it runs."""
+    if check.error:
+        return f"cannot run: {check.error}"
+    flags = []
+    if check.advisory:
+        flags.append("advisory")
+    elif not check.required:
+        flags.append("optional")
+    where = check.runs_in(plan.path)
+    if where:
+        flags.append(f"in {where}")
+    return check.display + (f"  ({', '.join(flags)})" if flags else "")
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     for plan in _plans(args):
         if not plan.runnable and args.runnable_only:
@@ -243,8 +262,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         manager = f" ({plan.manager})" if plan.manager else ""
         print(f"{plan.repo}  [{plan.stack}{manager}]")
         for check in plan.checks:
-            flag = "" if check.required else "  (optional)"
-            print(f"    {check.name:<10} {check.display}{flag}")
+            print(f"    {check.name:<10} {describe_check(check, plan)}")
         for note in plan.notes:
             print(f"    - {note}")
         print()
@@ -270,7 +288,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     for result in results:
         if result.status == "fail":
             failures += 1
-        if args.quiet and result.status == "pass":
+        # A pass with warnings still prints: an advisory spec check that failed
+        # is reported, even from the pre-push hook, which runs with --quiet.
+        warned = any(check.status == "warn" for check in result.checks)
+        if args.quiet and result.status == "pass" and not warned:
             continue
         print(f"{STATUS_MARK.get(result.status, '?')}  {result.repo}  "
               f"({result.duration:.0f}s)")
@@ -542,6 +563,8 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     policy = Policy.load(args.policy)
     cli_path = REPO_ROOT / "ci-local"
     checks = args.only.split(",") if args.only else None
+    if args.action == "status":
+        return _hooks_status(args, cli_path, checks)
     pending: Dict[str, int] = defaultdict(int)
     for repo_path in discover_repos(args.workspace, args.repo):
         if args.action == "install":
@@ -566,6 +589,19 @@ def cmd_hooks(args: argparse.Namespace) -> int:
     else:
         counts = ", ".join(f"{n} {action}" for action, n in pending.items())
         print(f"\ndry run: nothing written ({counts}). Re-run with --apply.")
+    return 0
+
+
+def _hooks_status(args: argparse.Namespace, cli_path: Path, checks) -> int:
+    """Where each repo's hook is, and whether git will run it. Reads only."""
+    counts: Dict[str, int] = defaultdict(int)
+    for repo_path in discover_repos(args.workspace, args.repo):
+        result = hook_status(repo_path, cli_path, sys.executable, checks)
+        counts[result.action] += 1
+        print(f"  {result.action:<10}{result.repo}  {result.detail}")
+    order = ["live", "dead", "none", "skipped"]
+    summary = ", ".join(f"{counts[a]} {a}" for a in order if counts[a])
+    print(f"\n{summary or 'no repos matched'}.")
     return 0
 
 
@@ -636,7 +672,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_p = add_command(sub, "run", help="run local checks")
     run_p.add_argument("--path", type=Path, help=PATH_HELP)
-    run_p.add_argument("--only", help="comma-separated check names")
+    run_p.add_argument(
+        "--only",
+        help="comma-separated check names; `spec` selects every spec:* check",
+    )
     run_p.add_argument("--install", action="store_true", help="force dependency install")
     run_p.add_argument("--jobs", type=int, default=4, help="repos in parallel")
     run_p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
@@ -712,12 +751,16 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.set_defaults(func=cmd_watch)
 
     hooks_p = add_command(sub, "hooks", help="manage the pre-push hook")
-    hooks_p.add_argument("action", choices=["install", "uninstall"])
+    hooks_p.add_argument("action", choices=["install", "uninstall", "status"])
     hooks_p.add_argument("--apply", action="store_true", help="write changes")
-    hooks_p.add_argument("--only", help="comma-separated checks for the hook")
+    hooks_p.add_argument(
+        "--only",
+        help=f"comma-separated checks for the hook (default: {','.join(DEFAULT_CHECKS)})",
+    )
     hooks_p.add_argument(
         "--force", action="store_true",
-        help="back up and replace an existing unmanaged hook",
+        help="back up and replace an existing unmanaged hook in .git/hooks, or "
+             "add the block to a core.hooksPath hook that git would commit",
     )
     hooks_p.set_defaults(func=cmd_hooks)
     return parser

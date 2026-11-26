@@ -53,6 +53,9 @@ Every command is a dry run until you pass `--apply`.
 ./ci-local hooks install
 ./ci-local hooks install --apply
 
+# Which repos git will actually run that hook in
+./ci-local hooks status
+
 # Cap artifact retention — storage is billed wherever the job ran, so
 # gating does nothing for it
 ./ci-local retention --days 7
@@ -200,6 +203,39 @@ the lockfile doesn't describe, and nothing in the output says so. Every install
 command is lockfile-frozen (`npm ci`, `--frozen-lockfile`, `--immutable`), so
 reinstalling on a false positive costs time and nothing else.
 
+### Spec checks
+
+A repo that keeps formal or executable specifications lists them in
+`.agent-configs/specs.toml`, a registry whose format CI-Agent-Sync owns. `plan`
+and `run` read it from the root of the checkout they check, for every stack,
+including a repo with no other checks:
+
+- Each entry that has a `check` and is not `planned` becomes a check named
+  `spec:<id>`. It runs without a shell from the repo root, or from the entry's
+  `workdir`, and stops after `timeout_seconds` (300 by default).
+- An entry with `gate = "required"` fails the run like any other check. An
+  `advisory` entry, which every `draft` is, is reported as `WARN` and never
+  fails the run, even when its tool is missing.
+- `--only spec` selects every `spec:*` check. Other names in `--only` still
+  match exactly: `--only test` does not select `test:<package>`.
+- A registry ci-local cannot use is a failure, not a skip. Bad TOML, a missing
+  `version`, a duplicate id, a `required` gate on a `draft` entry or a `check`
+  written as a string all turn into one failing check named `spec` that names
+  each problem.
+
+ci-local checks only the fields it uses: `version`, and each entry's `id`,
+`status`, `gate`, `check`, `workdir` and `timeout_seconds`. CI-Agent-Sync
+validates the rest of the format.
+
+```bash
+./ci-local plan --repo CI-Agent-Sync              # spec:<id> checks after lint and test
+./ci-local run --repo CI-Agent-Sync --only spec   # only the spec checks
+```
+
+The pre-push hook runs `--only lint,typecheck,test,spec` unless
+`hooks install --only` says otherwise, and `ci-local docs` lists each repo's
+spec checks with their gate.
+
 ### The pre-push hook checks the tree being pushed
 
 A repo's hooks live in the git dir that all its worktrees share, so the same
@@ -225,6 +261,50 @@ Hooks installed before this change still check the main clone until
 whether the hook would be installed, updated or skipped, and writes nothing;
 with it, it rewrites `.git/hooks/pre-push` in every repo it matches, so preview
 first or scope it with `--repo`.
+
+### The hook goes where git looks
+
+When `core.hooksPath` is set (husky's `.husky/_`, a `.githooks` directory),
+git never reads `.git/hooks`, so a hook there is dead and every push goes
+through unchecked. `hooks install` asks git where it looks
+(`git rev-parse --git-path hooks`) and, when that is not `.git/hooks`, puts its
+block between `# >>> ci-local pre-push` and `# <<< ci-local pre-push` at the top
+of that directory's `pre-push`, after the shebang. The rest of the file stays as
+it was and runs after the block. The block refuses the push when its checks
+fail, and otherwise falls through. A ci-local hook left in `.git/hooks` is
+removed in the same step, and `hooks uninstall` takes the block out again.
+
+It will not edit:
+
+- a `core.hooksPath` outside the repo, which may serve every repo on the
+  machine;
+- a hook file that git tracks, or one git would commit because it is not
+  ignored, unless you pass `--force`. The block names local paths and must not
+  reach a commit. husky's `.husky/_` is ignored, so it needs no `--force`;
+- a directory that does not exist yet, a hook that is not executable, or a
+  symlink.
+
+Two limits remain. husky rewrites `.husky/_` on every install of the repo's
+dependencies, which drops the block. And a relative `core.hooksPath` is read
+from the root of the worktree that pushes, so each linked worktree runs its own
+copy, and the block in the main clone does not check their pushes.
+`hooks status` reports both:
+
+```bash
+./ci-local hooks status
+#   live      repo-a  /path/.husky/_/pre-push (current); 3 of 4 linked worktree(s) ...
+#   dead      repo-b  /path/.git/hooks/pre-push is not run: core.hooksPath is .githooks, ...
+#   none      repo-c  no ci-local hook in /path/.git/hooks/pre-push
+```
+
+`live` means git runs the hook (and says whether `hooks install` would rewrite
+it), `dead` means a ci-local hook is installed where git does not look or is not
+executable, and `none` means there is no ci-local hook.
+
+The hook fails closed. If the `ci-local` script or the Python it names is gone,
+the push is refused with a message saying so, where an older hook printed
+"skipping" and let the push through. `SKIP_LOCAL_CI=1` still skips the checks,
+and in a shared hook file the rest of that file still runs.
 
 ### Tests
 

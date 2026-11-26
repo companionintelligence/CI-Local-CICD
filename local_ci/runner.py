@@ -8,6 +8,7 @@ a failing command is what you need, and that is what gets reported.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .detect import Check, RepoPlan, git_env, install_state
+from .specs import SLOT, in_slot
 
 DEFAULT_TIMEOUT = 1800  # 30 min; the longest hosted job in the report was ~25
 TAIL_LINES = 40
@@ -25,7 +27,7 @@ TAIL_LINES = 40
 class CheckResult:
     name: str
     command: str
-    status: str  # "pass" | "fail" | "skip" | "timeout"
+    status: str  # "pass" | "fail" | "skip" | "timeout" | "warn"
     duration: float = 0.0
     returncode: Optional[int] = None
     output_tail: str = ""
@@ -33,7 +35,8 @@ class CheckResult:
 
     @property
     def ok(self) -> bool:
-        return self.status in ("pass", "skip")
+        # "warn" is an advisory check that failed, timed out or could not run.
+        return self.status in ("pass", "skip", "warn")
 
 
 @dataclass
@@ -64,9 +67,30 @@ def _tail(text: str, lines: int = TAIL_LINES) -> str:
 
 
 def run_check(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
-    """Run one command in the repo, capturing its output."""
+    """Run one command in the repo, capturing its output.
+
+    An advisory check that fails, times out or cannot find its tool is
+    reported as "warn": shown, never failing the repo, and never read as a pass.
+    """
+    if check.error:
+        return CheckResult(check.name, check.display, "fail", reason=check.error)
+    result = _execute(check, plan, timeout)
+    if check.advisory and result.status in ("fail", "timeout", "skip"):
+        result.status = "warn"
+    return result
+
+
+def _execute(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
     command = check.display
-    if shutil.which(check.argv[0]) is None:
+    cwd = check.cwd or plan.path
+    if check.timeout is not None:
+        timeout = min(timeout, check.timeout)
+    program = check.argv[0]
+    # A relative path names a file in the check's directory, not in whatever
+    # directory ci-local itself was started from.
+    if os.sep in program and not os.path.isabs(program):
+        program = os.path.join(str(cwd), program)
+    if shutil.which(program) is None:
         return CheckResult(
             check.name,
             command,
@@ -89,7 +113,7 @@ def run_check(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
     try:
         proc = subprocess.run(
             check.argv,
-            cwd=str(plan.path),
+            cwd=str(cwd),
             env=env,
             capture_output=True,
             text=True,
@@ -129,6 +153,17 @@ def run_check(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
     )
 
 
+def wanted(name: str, only: Optional[List[str]]) -> bool:
+    """Whether ``--only`` selects a check.
+
+    Names match exactly - ``test`` is not ``test:<package>`` - except ``spec``,
+    which selects the whole spec slot.
+    """
+    if not only:
+        return True
+    return name in only or (SLOT in only and in_slot(name))
+
+
 def run_plan(
     plan: RepoPlan,
     only: Optional[List[str]] = None,
@@ -148,7 +183,7 @@ def run_plan(
     if plan.install and needs_install:
         queue.append(plan.install)
     for check in plan.checks:
-        if only and check.name not in only:
+        if not wanted(check.name, only):
             continue
         queue.append(check)
 

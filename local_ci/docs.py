@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from .detect import RepoPlan
+from .specs import REGISTRY_FILE, in_slot
 from .verify import RepoAudit, RemoteWorkflow
 
 # Workflows whose whole job is releasing. Called out separately because
@@ -90,15 +91,39 @@ def dispatch_command(repo_slug: str, workflow: RemoteWorkflow, ref: str) -> str:
 def _local_section(plan: Optional[RepoPlan]) -> List[str]:
     if plan is None or not plan.checks:
         return ["_No local checks detected._", ""]
-    lines = ["```bash", f"ci-local run --repo {plan.repo}", "```", "",
-             "Equivalent to:", "", "```bash"]
+    lines = ["```bash", f"ci-local run --repo {plan.repo}", "```", ""]
+    # Spec checks are listed in their own section, with their gate.
+    detected = [c for c in plan.checks if not in_slot(c.name)]
+    if not detected:
+        return lines
+    lines += ["Equivalent to:", "", "```bash"]
     if plan.install:
         lines.append(plan.install.display)
-    for check in plan.checks:
+    for check in detected:
         suffix = "" if check.required else "   # optional"
         lines.append(f"{check.display}{suffix}")
     lines += ["```", ""]
     return lines
+
+
+def _spec_section(plan: Optional[RepoPlan]) -> List[str]:
+    """The repo's spec checks, which gate a push only when `required`."""
+    specs = [c for c in plan.checks if in_slot(c.name)] if plan else []
+    if not specs:
+        return []
+    lines = ["### Spec checks", "",
+             f"From `{REGISTRY_FILE}`. Run only these with "
+             f"`ci-local run --repo {plan.repo} --only spec`. A required check "
+             "fails the run; an advisory one is reported as a warning.", ""]
+    for check in specs:
+        if check.error:
+            lines.append(f"- `{check.name}` fails without running: {check.error}")
+            continue
+        gate = "advisory" if check.advisory else "required"
+        where = check.runs_in(plan.path)
+        place = f", in `{where}`" if where else ""
+        lines.append(f"- `{check.name}` ({gate}{place}): `{check.display}`")
+    return lines + [""]
 
 
 def render_repo(
@@ -107,9 +132,12 @@ def render_repo(
     lines = [f"## {audit.repo}", "", f"Default branch: `{audit.base}`", ""]
 
     if audit.error:
-        return lines + [f"_Could not read workflows: {audit.error}_", ""]
+        # Spec checks come from the checkout, not from the workflows, so they
+        # are listed even when the workflows could not be read.
+        return (lines + [f"_Could not read workflows: {audit.error}_", ""]
+                + _spec_section(plan))
 
-    lines += ["### Test locally", ""] + _local_section(plan)
+    lines += ["### Test locally", ""] + _local_section(plan) + _spec_section(plan)
 
     manual = [w for w in audit.workflows if w.status in ("gated", "manual")]
     releases = [w for w in manual if is_release(w)]
