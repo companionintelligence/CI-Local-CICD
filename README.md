@@ -212,7 +212,9 @@ including a repo with no other checks:
 
 - Each entry that has a `check` and is not `planned` becomes a check named
   `spec:<id>`. It runs without a shell from the repo root, or from the entry's
-  `workdir`, and stops after `timeout_seconds` (300 by default).
+  `workdir`, and stops after `timeout_seconds` (300 by default). It runs in a
+  session of its own, so a timeout or Ctrl-C also stops anything it started,
+  such as a model checker's server on a fixed port.
 - An entry with `gate = "required"` fails the run like any other check. An
   `advisory` entry, which every `draft` is, is reported as `WARN` and never
   fails the run, even when its tool is missing.
@@ -308,7 +310,9 @@ was. It deletes a file only when `hooks install` created it, which the block's
 first line records, and nothing has been added to it since.
 
 Two limits remain. husky rewrites `.husky/_` on every install of the repo's
-dependencies, which drops the block. And a relative `core.hooksPath` is read
+dependencies, which drops the block. ci-local's own install step and checks
+run with `HUSKY=0`, which stops husky from doing that, but an install you run
+yourself still drops it. And a relative `core.hooksPath` is read
 from the root of the worktree that pushes, so each linked worktree runs its own
 copy, and the block in the main clone does not check their pushes.
 `hooks status` reports both:

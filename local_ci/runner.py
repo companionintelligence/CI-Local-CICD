@@ -10,17 +10,29 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from .detect import Check, RepoPlan, git_env, install_state
 from .specs import SLOT, in_slot
 
 DEFAULT_TIMEOUT = 1800  # 30 min; the longest hosted job in the report was ~25
 TAIL_LINES = 40
+
+# A spec check runs in a session of its own, so that a timeout stops the tool's
+# children as well as the tool: `quint verify` starts an Apalache server on a
+# fixed port, and one left running breaks the next run. Ctrl-C from the
+# terminal does not reach such a session, so `run_plans` passes it on. Other
+# checks stay in ci-local's process group, where Ctrl-C reaches them and they
+# keep the terminal.
+_LOCK = threading.Lock()
+_SESSIONS: Set[subprocess.Popen] = set()
+_STOPPING = threading.Event()
 
 
 @dataclass
@@ -108,28 +120,26 @@ def _execute(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
     # watch-mode defaults match what the hosted runners did.
     env.setdefault("CI", "true")
     env.setdefault("FORCE_COLOR", "0")
+    # husky reinstalls itself from the `prepare` script on every install, and
+    # that rewrite of `.husky/_` drops ci-local's block from the pre-push hook.
+    # HUSKY=0 makes husky skip it, here and in any check that installs.
+    env["HUSKY"] = "0"
 
+    session = in_slot(check.name)
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             check.argv,
             cwd=str(cwd),
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             # No stdin. A tool that stops to ask something (flutter's first-run
             # analytics consent, a package manager confirming an install) would
             # otherwise block until the timeout with no output explaining why.
             stdin=subprocess.DEVNULL,
-        )
-    except subprocess.TimeoutExpired:
-        return CheckResult(
-            check.name,
-            command,
-            "timeout",
-            duration=time.monotonic() - started,
-            reason=f"exceeded {timeout}s",
+            start_new_session=session,
         )
     except OSError as exc:
         return CheckResult(
@@ -140,6 +150,28 @@ def _execute(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
             reason=str(exc),
         )
 
+    with proc:
+        if session and not _track(proc):
+            _stop(proc, session)
+            return CheckResult(check.name, command, "fail", reason="interrupted")
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _stop(proc, session)
+            return CheckResult(
+                check.name,
+                command,
+                "timeout",
+                duration=time.monotonic() - started,
+                reason=f"exceeded {timeout}s",
+            )
+        except BaseException:
+            _stop(proc, session)
+            raise
+        finally:
+            if session:
+                _untrack(proc)
+
     duration = time.monotonic() - started
     if proc.returncode == 0:
         return CheckResult(check.name, command, "pass", duration, 0)
@@ -149,8 +181,52 @@ def _execute(check: Check, plan: RepoPlan, timeout: int) -> CheckResult:
         "fail",
         duration,
         proc.returncode,
-        output_tail=_tail((proc.stdout or "") + (proc.stderr or "")),
+        output_tail=_tail((stdout or "") + (stderr or "")),
     )
+
+
+def _track(proc: subprocess.Popen) -> bool:
+    """Note a running spec check, unless an interrupt has already come."""
+    with _LOCK:
+        if _STOPPING.is_set():
+            return False
+        _SESSIONS.add(proc)
+        return True
+
+
+def _untrack(proc: subprocess.Popen) -> None:
+    with _LOCK:
+        _SESSIONS.discard(proc)
+
+
+def _kill(proc: subprocess.Popen, session: bool) -> None:
+    """SIGKILL ``proc``, and when it leads a session, every process in it."""
+    killpg = getattr(os, "killpg", None)
+    if session and killpg is not None:
+        try:
+            killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    proc.kill()  # does nothing once the process has exited
+
+
+def _stop(proc: subprocess.Popen, session: bool) -> None:
+    """Kill a check that ran out of time or was interrupted, and reap it.
+
+    Its output is not read: a child that left the session could hold the pipes
+    open for as long as it runs.
+    """
+    _kill(proc, session)
+    proc.wait()
+
+
+def _interrupt() -> None:
+    """Kill the spec checks running now, and let no other check start."""
+    with _LOCK:
+        _STOPPING.set()
+        running = list(_SESSIONS)
+    for proc in running:
+        _kill(proc, session=True)
 
 
 def wanted(name: str, only: Optional[List[str]]) -> bool:
@@ -188,6 +264,8 @@ def run_plan(
         queue.append(check)
 
     for check in queue:
+        if _STOPPING.is_set():
+            break  # interrupted: start nothing new
         outcome = run_check(check, plan, timeout)
         result.checks.append(outcome)
         if not outcome.ok and check.required:
@@ -213,11 +291,19 @@ def run_plans(
     jobs: int = 4,
 ) -> List[RepoResult]:
     """Run several repos concurrently, preserving input order in the output."""
+    _STOPPING.clear()
     if jobs <= 1:
         return [run_plan(p, only, install, timeout) for p in plans]
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = [pool.submit(run_plan, p, only, install, timeout) for p in plans]
-        return [f.result() for f in futures]
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            # Ctrl-C raises here, in the main thread. The pool then waits for
+            # its workers, so stop the spec checks they are waiting on, and
+            # any check they would start next.
+            _interrupt()
+            raise
 
 
 def summarize(results: List[RepoResult]) -> Dict[str, object]:
